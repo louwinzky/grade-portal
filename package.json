@@ -1,0 +1,20 @@
+{
+  "name": "grade-portal",
+  "version": "1.0.0",
+  "description": "Read-only student grade portal, published from the instructor gradebook",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "create-teacher": "node scripts/create-teacher.js"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "pg": "^8.23.1"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}

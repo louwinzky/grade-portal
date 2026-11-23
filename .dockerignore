@@ -1,0 +1,17 @@
+node_modules
+.git
+.env
+.env.*
+backups
+*.dump
+*.tmp
+*.log
+*.key
+*.pem
+portal-root-ca.crt
+data
+test
+docs
+*.md
+Dockerfile
+docker-compose.yml

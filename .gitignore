@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Local config and secrets (keep the template)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+secrets/
+credentials/
+
+# Local data, backups and generated artifacts
+data/
+backups/
+*.dump
+*.tmp
+*.log
+portal-root-ca.crt
+
+# OS / editor files
+.DS_Store
+Thumbs.db

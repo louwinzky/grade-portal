@@ -1,0 +1,7 @@
+# HTTPS for the LAN using Caddy's built-in internal certificate authority.
+# Students' devices must trust that CA once (see README), or replace `tls internal` with your school's certificate.
+{$PORTAL_HOST:grades.school.lan} {
+	tls internal
+	encode gzip
+	reverse_proxy app:3000
+}

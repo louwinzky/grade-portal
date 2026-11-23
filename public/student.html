@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grades — Grade Portal</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head><body>
+<header class="topbar" id="top"></header>
+<div class="shell">
+  <nav class="sidebar" id="nav" aria-label="Main menu"></nav>
+  <main class="content">
+    <section id="view-grades">
+      <div class="panel term-row">
+        <label for="term">School Year &amp; Term:</label>
+        <select id="term" aria-label="School year and term"></select>
+        <span class="level" id="level"></span>
+        <span class="gwa" id="gwa"></span>
+      </div>
+      <div class="cards" id="cards"></div>
+      <p class="empty" id="empty" hidden>No grades have been published for you yet.</p>
+    </section>
+    <section id="view-faq" class="panel doc" hidden></section>
+    <section id="view-privacy" class="panel doc" hidden></section>
+  </main>
+</div>
+<script src="/assets/common.js"></script>
+<script src="/assets/student.js"></script>
+</body></html>

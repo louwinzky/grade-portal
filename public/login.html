@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — Grade Portal</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head><body>
+<div class="login-shell">
+  <main class="login-box">
+    <div class="head"><span class="wordmark">grade<span class="gold">portal</span></span><p>Sign in to view your grades</p></div>
+    <form id="f" autocomplete="on">
+      <div class="field"><label for="u">User ID</label><input id="u" type="text" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required></div>
+      <button class="btn" id="go" type="submit">Sign in</button>
+      <p class="msg" id="msg" role="alert"></p>
+      <p class="note">First time here? Use the temporary password from your instructor. Forgot your password? Ask your instructor to reset it.</p>
+    </form>
+  </main>
+</div>
+<script src="/assets/login.js"></script>
+</body></html>
