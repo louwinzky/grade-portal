@@ -40,6 +40,8 @@
     logout: '<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
+    trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/>',
+    users: '<path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.2"/><path d="M17 11a3 3 0 0 0 0-6M18 20v-1.4a3.4 3.4 0 0 0-2.4-3.3"/>',
   };
   function icon(name) {
     const span = document.createElement('span');

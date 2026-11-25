@@ -21,7 +21,8 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
    # set PORTAL_HOST in .env to the name students will type, e.g. grades.school.lan
    ```
 3. **Start**: `docker compose up -d --build`   (first start applies the database schema automatically)
-4. **Create your instructor account** (prints a one-time password; you choose a new one at first sign-in):
+4. **Create your instructor account** (prints a one-time password; you choose a new one at first sign-in).
+   The first instructor becomes the **Owner**, who can manage accounts from the dashboard:
    ```bash
    docker compose exec app node scripts/create-teacher.js prof "Prof. Reyes"
    ```
@@ -36,8 +37,15 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
 
 ### Using it
 
-1. **New subject** (e.g. Networking 2, school year & term, section). Change its code, title, term or section
-   later with **Edit subject**; that does not move students or grades.
+1. **New subject** (e.g. Networking 2, school year & term, section). Pick the **School year** and **Term** from
+   the dropdowns (an **Other** option accepts a custom term). The school year follows a **June–May academic
+   calendar** and rolls forward automatically: previous, current and next year are offered, with the current
+   June–May year selected by default (Jan–May still uses the year that began last June). Change any of these later
+   with **Edit subject**; that does not move students or grades. Use the **School year & term** selector in the
+   sidebar to filter subjects, and the **Search subjects** box to filter by title, code, section or term. With
+   **All terms** selected, subjects are grouped under their term headings; **New subject** starts with the
+   selected term filled in. Wrong subject? **Delete** removes it and its imported grades after confirmation —
+   student accounts and other subjects are not affected.
 2. In the gradebook, open the section → **Registrar Report (CSV)**. Upload it → **Check file** → **Import**.
    Every student needs a **Student ID** in the gradebook; rows without one are skipped and listed.
 3. **Create accounts**: usernames are Student IDs, each student gets a one-time temporary password
@@ -46,6 +54,37 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
    The Final Grade appears only after all four are released. Re-import any time to update grades.
 
 `docs/sample-registrar-report.csv` is a real export from the gradebook you can try first.
+
+## Instructor accounts
+
+The **first instructor created becomes the Owner**. The Owner (and any other instructor they promote) sees an
+**Instructors** item in the dashboard sidebar and can manage up to ~50 accounts there:
+
+- **New instructor** — username, full name and optional Owner access. A random temporary password is generated
+  and shown **once** (copy it or download the CSV before closing the dialog). They must choose their own password
+  at first sign-in. Usernames are **case-sensitive** (`Prof` and `prof` are different accounts) and must be unique.
+  Passwords must be at least 8 characters.
+- **Reset password** — issues a new temporary password, signs the instructor out everywhere and forces another
+  password change at next sign-in. Use this when they forget their password. **You cannot reset yourself here**:
+  change your own password from the account menu (avatar → Change password). If you lose your own password, an
+  operator must use the CLI command below.
+- **Disable / Enable** — disabling immediately ends their sessions and blocks sign-in; their subjects and grades
+  are kept. Re-enable to let them back in with their existing password.
+- **Make owner / Remove owner** — owners can create and manage accounts. At least one active Owner is always kept;
+  you cannot disable or demote yourself.
+
+Instructors who are not Owners do not see the management page, and the API rejects them with `403`.
+
+If nobody can sign in (e.g. the Owner is locked out), an operator with shell access can reset any instructor
+from the host:
+
+```bash
+docker compose exec app node scripts/reset-teacher-password.js prof
+```
+
+It prints a one-time password, ends that instructor's sessions, forces a password change and writes an audit
+entry. To create another instructor from the shell, use
+`docker compose exec app node scripts/create-teacher.js [--owner] <username> "<Full Name>"`.
 
 ## Proxmox notes
 
@@ -70,6 +109,8 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
 | Nightly backup (cron) | `0 2 * * * cd /opt/grade-portal && ./scripts/backup-db.sh >> backups/backup.log 2>&1` |
 | **Restore** | `./scripts/restore-db.sh backups/portal-XXXX.dump` (asks for confirmation, stops the app during restore) |
 | Reset a student's password | Instructor page → Students and accounts → Reset password |
+| Reset an instructor's password | Instructor page → Instructors → Reset password (Owner), or `docker compose exec app node scripts/reset-teacher-password.js <username>` |
+| Create / disable an instructor | Instructor page → Instructors (Owner only), or `scripts/create-teacher.js [--owner] <username> "<Full Name>"` |
 | Stop everything | `docker compose down` (data stays in volumes; `down -v` would delete it) |
 
 Copy `backups/` to another machine regularly. A backup that lives only on the same server is not a backup.
@@ -90,16 +131,18 @@ npm test            # end-to-end, security, importer, and PostgreSQL-specific su
 
 Each test run creates and drops its own schema, so it never touches real data. Without `TEST_DATABASE_URL`
 the database suites are skipped. To run the app outside Docker: set `PGHOST/PGUSER/PGPASSWORD/PGDATABASE`
-(or `DATABASE_URL`), then `npm start`.
+(or `DATABASE_URL`), then `npm start`. Node does not hot-reload server code, so restart it after editing
+`src/` or `server.js`. Static assets are cached for 1 hour in production (`NODE_ENV=production`, as in Docker)
+but not cached locally, so a normal refresh is enough after frontend edits in local preview.
 
 ## What it protects against (and doesn't)
 
 | Control | Where |
 |---|---|
-| Passwords hashed with scrypt; temporary passwords random, single-use, must be changed at first sign-in | `src/auth.js` |
+| Passwords hashed with scrypt; minimum 8 characters; temporary passwords random, single-use, must be changed at first sign-in | `src/auth.js` |
 | Server-side release flags: unreleased grades are never sent to the browser | `src/api.js` |
 | Students can only query their own record; the API accepts no student identifier | `src/api.js` |
-| Teachers can only manage their own subjects | `src/api.js` |
+| Teachers can only manage their own subjects; only Owners can manage instructor accounts | `src/api.js` |
 | Session cookie `HttpOnly` + `SameSite=Strict` + `Secure`; tokens stored hashed; password change/reset ends other sessions | `src/auth.js` |
 | Login lockout (5 failures / 15 min per account, 40 per IP); same error for unknown user and wrong password | `src/app.js` |
 | Same-origin + JSON-only writes (CSRF); strict CSP, no inline scripts, no external assets | `src/app.js` |
@@ -107,8 +150,9 @@ the database suites are skipped. To run the app outside Docker: set `PGHOST/PGUS
 | Containers: app runs as non-root, read-only filesystem, all capabilities dropped; database on an internal-only network | `docker-compose.yml` |
 | Audit log of logins, imports, releases, account and password actions | `audit_log` table |
 
-Not covered: two-factor sign-in for instructors, email/SMS password recovery (instructors reset passwords),
-protection from someone with access to the server or its backups, and an independent security review.
+Not covered: two-factor sign-in for instructors, email/SMS password recovery (an Owner or an operator with shell
+access must reset an instructor's password), protection from someone with access to the server or its backups,
+and an independent security review.
 Have your school IT or data privacy officer review this before students rely on it.
 
 ## Data privacy

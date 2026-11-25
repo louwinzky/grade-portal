@@ -62,6 +62,15 @@ function mountApi(app, { db, need, audit, sessions }) {
     }
   });
 
+  // Delete a subject and its published grades. Student accounts and other subjects are untouched.
+  app.delete('/api/admin/subjects/:id', need('teacher'), async (req, res) => {
+    const s = await mine(req);
+    if (!s) return notFound(res);
+    await db.query('DELETE FROM subjects WHERE id = $1 AND owner_id = $2', [s.id, req.user.id]);
+    await audit(req.user.id, 'subject_deleted', `${s.code} ${s.term} ${s.section}`.trim(), req.ip);
+    res.json({ ok: true });
+  });
+
   // Edit a subject's details (code, title, term, section). Grades stay import-only on purpose.
   app.put('/api/admin/subjects/:id', need('teacher'), async (req, res) => {
     const s = await mine(req);
@@ -121,7 +130,7 @@ function mountApi(app, { db, need, audit, sessions }) {
     try {
       await db.tx(async (q) => {
         for (const r of parsed.rows) {
-          let st = await q.one('SELECT id, full_name FROM students WHERE lower(student_no) = lower($1)', [r.studentNo]);
+          let st = await q.one('SELECT id, full_name FROM students WHERE student_no = $1', [r.studentNo]);
           if (!st) { st = await q.one('INSERT INTO students (student_no, full_name) VALUES ($1,$2) RETURNING id', [r.studentNo, r.fullName]); stats.newStudents++; }
           else if (st.full_name !== r.fullName) { await q.query('UPDATE students SET full_name = $1 WHERE id = $2', [r.fullName, st.id]); stats.renamed++; }
           // atomic upsert; (xmax = 0) is true only for rows that were newly inserted
@@ -175,6 +184,89 @@ function mountApi(app, { db, need, audit, sessions }) {
     await sessions.destroyAllFor(row.userId);
     await audit(req.user.id, 'password_reset', row.student_no, req.ip);
     res.json({ studentNo: row.student_no, fullName: row.full_name, username: row.student_no, tempPassword: c.pw });
+  });
+
+  // ================= INSTRUCTOR ACCOUNT MANAGEMENT (owner only) =================
+  const teacherOnly = need('teacher');
+  const needOwner = (req, res, next) => teacherOnly(req, res, () => {
+    if (!req.user.isOwner) return res.status(403).json({ error: 'forbidden', message: 'Owner access required.' });
+    next();
+  });
+  const teacherById = (req) => {
+    const id = toId(req.params.id);
+    return id ? db.one("SELECT * FROM users WHERE id = $1 AND role = 'teacher'", [id]) : undefined;
+  };
+  const activeOwners = async () => (await db.one("SELECT COUNT(*)::int AS c FROM users WHERE role = 'teacher' AND is_owner AND active")).c;
+
+  app.get('/api/admin/teachers', needOwner, async (req, res) => {
+    res.json(await db.all(`
+      SELECT u.id, u.username, u.full_name AS "fullName", u.is_owner AS "isOwner", u.active,
+             to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS "createdAt",
+             (SELECT COUNT(*) FROM subjects s WHERE s.owner_id = u.id)::int AS "subjectCount",
+             (SELECT to_char(max(a.at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI')
+                FROM audit_log a WHERE a.user_id = u.id AND a.action = 'login') AS "lastLogin"
+      FROM users u WHERE u.role = 'teacher'
+      ORDER BY u.is_owner DESC, u.active DESC, u.full_name`));
+  });
+
+  app.post('/api/admin/teachers', needOwner, async (req, res) => {
+    const b = req.body || {};
+    const username = text(b.username, 2, 64), fullName = text(b.fullName, 2, 80);
+    if (!username || !fullName) return res.status(400).json({ error: 'bad_request', message: 'Username and full name are required.' });
+    const pw = A.tempPassword(16);
+    try {
+      const row = await db.one(
+        "INSERT INTO users (username, password_hash, role, full_name, is_owner, must_change_password) VALUES ($1,$2,'teacher',$3,$4,true) RETURNING id",
+        [username, await A.hashPassword(pw), fullName, b.owner === true]);
+      await audit(req.user.id, 'teacher_created', `${username} (${fullName})${b.owner === true ? ' [owner]' : ''}`, req.ip);
+      res.status(201).json({ id: row.id, username, fullName, isOwner: b.owner === true, tempPassword: pw });
+    } catch (e) {
+      if (isUniqueViolation(e)) return res.status(409).json({ error: 'exists', message: 'That username is already in use.' });
+      throw e;
+    }
+  });
+
+  app.post('/api/admin/teachers/:id/reset-password', needOwner, async (req, res) => {
+    const t = await teacherById(req);
+    if (!t) return notFound(res);
+    // Resetting yourself signs you out before you can copy the one-time password.
+    if (t.id === req.user.id)
+      return res.status(400).json({ error: 'self_reset',
+        message: 'Use Account → Change password for your own password. If you are locked out, an operator can reset it with scripts/reset-teacher-password.js.' });
+    const pw = A.tempPassword(16);
+    await db.tx(async q => {
+      await q.query('UPDATE users SET password_hash = $1, must_change_password = true WHERE id = $2', [await A.hashPassword(pw), t.id]);
+      await q.query('DELETE FROM sessions WHERE user_id = $1', [t.id]);
+    });
+    await audit(req.user.id, 'teacher_password_reset', t.username, req.ip);
+    res.json({ id: t.id, username: t.username, fullName: t.full_name, tempPassword: pw });
+  });
+
+  app.put('/api/admin/teachers/:id/active', needOwner, async (req, res) => {
+    const t = await teacherById(req);
+    if (!t) return notFound(res);
+    if (t.id === req.user.id) return res.status(400).json({ error: 'bad_request', message: 'You cannot disable your own account.' });
+    const active = (req.body || {}).active;
+    if (typeof active !== 'boolean') return res.status(400).json({ error: 'bad_request', message: 'Pass active as true or false.' });
+    if (!active && t.is_owner && t.active && await activeOwners() <= 1)
+      return res.status(400).json({ error: 'last_owner', message: 'At least one active owner must remain.' });
+    await db.query('UPDATE users SET active = $1 WHERE id = $2', [active, t.id]);
+    if (!active) await sessions.destroyAllFor(t.id);
+    await audit(req.user.id, active ? 'teacher_reactivated' : 'teacher_deactivated', t.username, req.ip);
+    res.json({ id: t.id, active });
+  });
+
+  app.put('/api/admin/teachers/:id/owner', needOwner, async (req, res) => {
+    const t = await teacherById(req);
+    if (!t) return notFound(res);
+    const owner = (req.body || {}).owner;
+    if (typeof owner !== 'boolean') return res.status(400).json({ error: 'bad_request', message: 'Pass owner as true or false.' });
+    if (t.id === req.user.id && !owner) return res.status(400).json({ error: 'bad_request', message: 'You cannot remove your own owner access.' });
+    if (!owner && t.is_owner && t.active && await activeOwners() <= 1)
+      return res.status(400).json({ error: 'last_owner', message: 'At least one active owner must remain.' });
+    await db.query('UPDATE users SET is_owner = $1 WHERE id = $2', [owner, t.id]);
+    await audit(req.user.id, owner ? 'owner_granted' : 'owner_revoked', t.username, req.ip);
+    res.json({ id: t.id, isOwner: owner });
   });
 
   app.get('/api/admin/audit', need('teacher'), async (req, res) => {

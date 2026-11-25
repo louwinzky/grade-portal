@@ -22,7 +22,12 @@ async function boot() {
   const server = await new Promise(r => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
   const db = app.locals.db;
-  const addTeacher = async (username, name) => (await db.one("INSERT INTO users (username,password_hash,role,full_name,must_change_password) VALUES ($1,$2,'teacher',$3,false) RETURNING id", [username, await A.hashPassword('teacher-pass-1234'), name])).id;
+  const addTeacher = async (username, name, owner = false) => {
+    const owners = await db.one("SELECT COUNT(*)::int AS c FROM users WHERE role='teacher' AND is_owner");
+    const isOwner = owner || owners.c === 0;   // first teacher owns the portal, like the CLI script
+    return (await db.one("INSERT INTO users (username,password_hash,role,full_name,is_owner,must_change_password) VALUES ($1,$2,'teacher',$3,$4,false) RETURNING id",
+      [username, await A.hashPassword('teacher-pass-1234'), name, isOwner])).id;
+  };
 
   // tiny client with its own cookie jar
   const client = () => {
@@ -35,11 +40,20 @@ async function boot() {
       let json = null; try { json = await res.clone().json(); } catch {}
       return { status: res.status, json, headers: res.headers, setCookie: sc };
     };
-    return { get: (u, h) => call('GET', u, null, h), post: (u, b, h) => call('POST', u, b, h), put: (u, b) => call('PUT', u, b) };
+    return { get: (u, h) => call('GET', u, null, h), post: (u, b, h) => call('POST', u, b, h), put: (u, b) => call('PUT', u, b), del: (u) => call('DELETE', u) };
   };
   const close = async () => { await new Promise(r => server.close(r)); await db.close(); await db.dropSchema(); };
   return { app, db, server, base, addTeacher, client, close, schema };
 }
+
+test('password policy: 8 characters minimum for every role', () => {
+  for (const role of ['teacher', 'student']) {
+    const user = { role, username: 'professor1' };
+    assert.equal(A.checkNewPassword('1234567', user), 'Password must be at least 8 characters.');
+    assert.equal(A.checkNewPassword('goodpass1', user), null);
+    assert.equal(A.checkNewPassword('professor1', user), 'Password cannot be your username.');
+  }
+});
 
 test('end-to-end: publish, release, student view, isolation', needDb, async (t) => {
   const S = await boot();
@@ -68,7 +82,10 @@ test('end-to-end: publish, release, student view, isolation', needDb, async (t) 
   const dup = await teacher.post('/api/admin/subjects', { code: 'CS101', title: 'CS', term: 'T2', section: 'S' });
   assert.equal(dup.status, 201);
   assert.equal((await teacher.put(`/api/admin/subjects/${id}`, { code: 'CS101', title: 'CS', term: 'T2', section: 'S' })).status, 409);
-  await S.db.query('DELETE FROM subjects WHERE id = $1', [dup.json.id]);
+  // delete works through the API and removes the subject from the list
+  assert.deepEqual((await teacher.del(`/api/admin/subjects/${dup.json.id}`)).json, { ok: true });
+  assert.equal((await teacher.get(`/api/admin/subjects/${dup.json.id}`)).status, 404);
+  assert.ok(!(await teacher.get('/api/admin/subjects')).json.some(x => x.id === dup.json.id));
   const dry = await teacher.post(`/api/admin/subjects/${id}/import`, { csv: SAMPLE, dryRun: true });
   assert.equal(dry.status, 200);
   assert.equal(dry.json.rows, 3);
@@ -147,6 +164,7 @@ test('end-to-end: publish, release, student view, isolation', needDb, async (t) 
   assert.equal((await other.get(`/api/admin/subjects/${id}`)).status, 404);
   assert.equal((await other.put(`/api/admin/subjects/${id}/releases`, { prelim: false })).status, 404);
   assert.equal((await other.put(`/api/admin/subjects/${id}`, { code: 'HACK', title: 'Hack', term: 'T' })).status, 404);
+  assert.equal((await other.del(`/api/admin/subjects/${id}`)).status, 404);
   assert.equal((await other.post(`/api/admin/students/${(await S.db.one('SELECT id FROM students LIMIT 1')).id}/reset-password`)).status, 404);
 
   // password reset kills the old session and forces a change again
@@ -160,6 +178,115 @@ test('end-to-end: publish, release, student view, isolation', needDb, async (t) 
   // logout invalidates the session
   assert.equal((await mar.post('/api/logout', {})).status, 200);
   assert.equal((await mar.get('/api/me')).status, 401);
+});
+
+test('deleting a subject cascades grades but keeps students and accounts', needDb, async (t) => {
+  const S = await boot();
+  t.after(S.close);
+  await S.addTeacher('prof', 'Prof. Reyes');
+  await S.addTeacher('other', 'Other Teacher');
+  const teacher = S.client();
+  await teacher.post('/api/login', { username: 'prof', password: 'teacher-pass-1234' });
+
+  const sub = await teacher.post('/api/admin/subjects', { code: 'DEL1', title: 'To Delete', term: 'T1', section: 'S' });
+  assert.equal(sub.status, 201);
+  await teacher.post(`/api/admin/subjects/${sub.json.id}/import`, { csv: SAMPLE });
+  await teacher.post(`/api/admin/subjects/${sub.json.id}/accounts`, {});
+  assert.equal((await S.db.one('SELECT COUNT(*)::int AS c FROM enrollments WHERE subject_id = $1', [sub.json.id])).c, 3);
+
+  const other = S.client();
+  await other.post('/api/login', { username: 'other', password: 'teacher-pass-1234' });
+  assert.equal((await other.del(`/api/admin/subjects/${sub.json.id}`)).status, 404);
+  assert.equal((await S.db.one('SELECT COUNT(*)::int AS c FROM subjects WHERE id = $1', [sub.json.id])).c, 1);
+
+  const del = await teacher.del(`/api/admin/subjects/${sub.json.id}`);
+  assert.equal(del.status, 200);
+  assert.deepEqual(del.json, { ok: true });
+  assert.equal((await teacher.get(`/api/admin/subjects/${sub.json.id}`)).status, 404);
+  assert.equal((await S.db.one('SELECT COUNT(*)::int AS c FROM enrollments WHERE subject_id = $1', [sub.json.id])).c, 0, 'grades are removed with the subject');
+  assert.equal((await S.db.one('SELECT COUNT(*)::int AS c FROM students')).c, 3, 'students survive');
+  assert.equal((await S.db.one("SELECT COUNT(*)::int AS c FROM users WHERE role = 'student'")).c, 3, 'student accounts survive');
+  assert.equal((await S.db.one("SELECT COUNT(*)::int AS c FROM audit_log WHERE action = 'subject_deleted'")).c, 1);
+});
+
+test('teacher management: owners create, reset, disable and promote instructors', needDb, async (t) => {
+  const S = await boot();
+  t.after(S.close);
+  const ownerId = await S.addTeacher('owner', 'Owner Teacher');
+  await S.addTeacher('plain', 'Plain Teacher');
+  const owner = S.client();
+  await owner.post('/api/login', { username: 'owner', password: 'teacher-pass-1234' });
+
+  assert.equal((await owner.get('/api/me')).json.isOwner, true);
+  assert.equal((await owner.get('/api/me')).json.id, ownerId);
+  // resetting yourself would revoke your own session before the one-time password is shown
+  const selfReset = await owner.post(`/api/admin/teachers/${ownerId}/reset-password`, {});
+  assert.equal(selfReset.status, 400);
+  assert.match(selfReset.json.message, /Change password/);
+  let list = await owner.get('/api/admin/teachers');
+  assert.equal(list.status, 200);
+  assert.equal(list.json.length, 2);
+  assert.equal(list.json.find(x => x.username === 'owner').isOwner, true);
+  assert.equal(list.json.find(x => x.username === 'plain').isOwner, false);
+
+  // a non-owner cannot manage accounts
+  const plain = S.client();
+  await plain.post('/api/login', { username: 'plain', password: 'teacher-pass-1234' });
+  assert.equal((await plain.get('/api/admin/teachers')).status, 403);
+  assert.equal((await plain.post('/api/admin/teachers', { username: 'x', fullName: 'X' })).status, 403);
+  assert.equal((await plain.put(`/api/admin/teachers/${ownerId}/owner`, { owner: false })).status, 403);
+
+  // create, with a one-time password and case-sensitive uniqueness
+  const made = await owner.post('/api/admin/teachers', { username: 'newbie', fullName: 'New Teacher' });
+  assert.equal(made.status, 201);
+  assert.ok(made.json.tempPassword.length >= 16);
+  assert.equal(made.json.isOwner, false);
+  assert.equal((await owner.post('/api/admin/teachers', { username: 'newbie', fullName: 'Dup' })).status, 409);
+  const variant = await owner.post('/api/admin/teachers', { username: 'NEWBIE', fullName: 'Case Variant' });
+  assert.equal(variant.status, 201, 'case variants are different accounts');
+  assert.equal((await S.client().post('/api/login', { username: 'NEWBIE', password: variant.json.tempPassword })).status, 200);
+  assert.equal((await S.client().post('/api/login', { username: 'newbie', password: variant.json.tempPassword })).status, 401);
+  assert.equal((await owner.post('/api/admin/teachers', { username: 'x', fullName: '' })).status, 400);
+
+  // the new instructor is forced to choose a password
+  const nc = S.client();
+  assert.equal((await nc.post('/api/login', { username: 'newbie', password: made.json.tempPassword })).json.mustChangePassword, true);
+  assert.equal((await nc.get('/api/admin/subjects')).status, 403);
+
+  // reset kills their session and forces another change
+  const reset = await owner.post(`/api/admin/teachers/${made.json.id}/reset-password`, {});
+  assert.equal(reset.status, 200);
+  assert.notEqual(reset.json.tempPassword, made.json.tempPassword);
+  assert.equal((await nc.get('/api/me')).status, 401, 'old session must be invalid after reset');
+  const nc2 = S.client();
+  assert.equal((await nc2.post('/api/login', { username: 'newbie', password: reset.json.tempPassword })).json.mustChangePassword, true);
+
+  // guards: self-disable, self-demote and removing the last owner
+  assert.equal((await owner.put(`/api/admin/teachers/${ownerId}/active`, { active: false })).status, 400);
+  assert.equal((await owner.put(`/api/admin/teachers/${ownerId}/owner`, { owner: false })).status, 400);
+
+  // disable / re-enable
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/active`, { active: false })).status, 200);
+  assert.equal((await nc2.get('/api/me')).status, 401, 'disabled session must be killed');
+  assert.equal((await S.client().post('/api/login', { username: 'newbie', password: reset.json.tempPassword })).status, 401, 'disabled cannot sign in');
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/active`, { active: true })).status, 200);
+
+  // promote / demote
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/owner`, { owner: true })).status, 200);
+  list = await owner.get('/api/admin/teachers');
+  assert.equal(list.json.find(x => x.username === 'newbie').isOwner, true);
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/owner`, { owner: false })).status, 200);
+
+  // bad ids / payloads
+  assert.equal((await owner.post('/api/admin/teachers/99999/reset-password', {})).status, 404);
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/active`, { active: 'yes' })).status, 400);
+  assert.equal((await owner.put(`/api/admin/teachers/${made.json.id}/owner`, {})).status, 400);
+
+  const actions = (await owner.get('/api/admin/audit')).json.map(r => r.action);
+  assert.ok(actions.includes('teacher_created'));
+  assert.ok(actions.includes('teacher_password_reset'));
+  assert.ok(actions.includes('teacher_deactivated'));
+  assert.ok(actions.includes('owner_granted'));
 });
 
 test('login hardening, CSRF and headers', needDb, async (t) => {
@@ -205,21 +332,26 @@ test('importer rejects bad files cleanly', async (t) => {
   assert.equal(r.errors.length, 2);
 });
 
-test('postgres: case-insensitive usernames, uniqueness, health check, idempotent migrations', needDb, async (t) => {
+test('postgres: case-sensitive IDs, uniqueness, health check, idempotent migrations', needDb, async (t) => {
   const S = await boot();
   t.after(S.close);
   await S.addTeacher('Prof', 'Prof');
-  // login works regardless of the case typed
-  assert.equal((await S.client().post('/api/login', { username: 'PROF', password: 'teacher-pass-1234' })).status, 200);
-  // ...and two usernames differing only by case cannot both exist
-  await assert.rejects(() => S.addTeacher('prof', 'Dup'), e => e.code === '23505');
+  // the case typed must match exactly
+  assert.equal((await S.client().post('/api/login', { username: 'PROF', password: 'teacher-pass-1234' })).status, 401);
+  assert.equal((await S.client().post('/api/login', { username: 'Prof', password: 'teacher-pass-1234' })).status, 200);
+  // usernames differing only by case can coexist; exact duplicates cannot
+  await S.addTeacher('prof', 'Dup');
+  await assert.rejects(() => S.addTeacher('Prof', 'Dup2'), e => e.code === '23505');
+  // student numbers are case-sensitive too
+  await S.db.query("INSERT INTO students (student_no, full_name) VALUES ('AB-1','One'),('ab-1','Two')");
+  await assert.rejects(() => S.db.query("INSERT INTO students (student_no, full_name) VALUES ('AB-1','Three')"), e => e.code === '23505');
 
   assert.deepEqual((await (await fetch(S.base + '/healthz')).json()), { ok: true });
 
   // starting a second app on the same schema must not re-run migrations or fail
   const again = await createApp({ connectionString: DB_URL, schema: S.schema });
   const applied = await again.locals.db.all('SELECT name FROM schema_migrations');
-  assert.equal(applied.length, 1);
+  assert.equal(applied.length, 3);
   await again.locals.db.close();
 
   // the database itself rejects impossible grades, independent of application checks

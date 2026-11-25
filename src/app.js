@@ -72,13 +72,13 @@ async function createApp(opts = {}) {
     const { username, password } = req.body || {};
     if (typeof username !== 'string' || typeof password !== 'string' || !username || !password || username.length > 64 || password.length > 200)
       return res.status(400).json({ error: 'bad_request', message: 'Enter your username and password.' });
-    const uKey = username.toLowerCase(), iKey = req.ip;
+    const uKey = username, iKey = req.ip;   // usernames are case-sensitive
     const wait = Math.max(userLimiter.retryAfterMs(uKey), ipLimiter.retryAfterMs(iKey));
     if (wait) return res.status(429).json({ error: 'locked', message: `Too many attempts. Try again in ${Math.ceil(wait / 60000)} minute(s).` });
 
-    const user = await db.one('SELECT * FROM users WHERE lower(username) = lower($1)', [username]);
+    const user = await db.one('SELECT * FROM users WHERE username = $1', [username]);
     const ok = await A.verifyPassword(password, user ? user.password_hash : await A.dummyHash());
-    if (!user || !ok) {
+    if (!user || !user.active || !ok) {
       userLimiter.fail(uKey); ipLimiter.fail(iKey);
       await audit(user ? user.id : null, 'login_failed', username.slice(0, 64), req.ip);
       return res.status(401).json({ error: 'invalid', message: 'Invalid username or password.' });
@@ -97,7 +97,7 @@ async function createApp(opts = {}) {
 
   app.get('/api/me', need(), (req, res) => {
     const u = req.user;
-    res.json({ username: u.username, role: u.role, fullName: u.fullName, mustChangePassword: !!u.mustChange });
+    res.json({ id: u.id, username: u.username, role: u.role, fullName: u.fullName, mustChangePassword: !!u.mustChange, isOwner: !!u.isOwner });
   });
 
   app.post('/api/change-password', need(), async (req, res) => {
@@ -131,7 +131,9 @@ async function createApp(opts = {}) {
   app.get('/login', page('login.html'));
   app.get('/student', page('student.html', 'student'));
   app.get('/admin', page('admin.html', 'teacher'));
-  app.use('/assets', express.static(path.join(pub, 'assets'), { maxAge: '1h' }));
+  // Cache assets in production; keep local preview refreshes instant (Docker sets NODE_ENV=production).
+  const assetCache = process.env.NODE_ENV === 'production' ? { maxAge: '1h' } : { maxAge: 0, etag: false, lastModified: false };
+  app.use('/assets', express.static(path.join(pub, 'assets'), assetCache));
 
   app.use((err, req, res, next) => {  // eslint-disable-line no-unused-vars
     if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'bad_json', message: 'Malformed request.' });

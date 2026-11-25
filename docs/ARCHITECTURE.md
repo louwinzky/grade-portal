@@ -37,9 +37,9 @@ hashing/sessions/lockout, `src/csv.js` importer, `src/db.js` pool, transactions 
 `migrations/*.sql` schema, `public/` static pages (no CDN, no inline scripts).
 
 ## Data model (PostgreSQL)
-- `students(student_no, full_name)`: identity from the school's Student ID; unique case-insensitively.
-- `users(username, password_hash, role teacher|student, student_id UNIQUE, must_change_password)`: at most one
-  account per student; unique case-insensitive usernames.
+- `students(student_no, full_name)`: identity from the school's Student ID; unique and case-sensitive.
+- `users(username, password_hash, role teacher|student, student_id UNIQUE, must_change_password, is_owner, active)`:
+  at most one account per student; usernames are unique and case-sensitive (`Prof` ≠ `prof`).
 - `subjects(owner_id, code, title, term, section, rel_prelim, rel_midterm, rel_prefinal, rel_finals)`:
   the `rel_*` booleans are the release switches.
 - `enrollments(subject_id, student_id, prelim, midterm, prefinal, finals, final_pct, final_gp, remark)`:

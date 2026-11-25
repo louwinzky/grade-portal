@@ -34,7 +34,7 @@ function tempPassword(len = 10) {
 
 const COMMON = new Set(['password', 'password1', '12345678', '123456789', 'qwertyuiop', 'iloveyou', 'admin1234']);
 function checkNewPassword(pw, user) {
-  const min = user.role === 'teacher' ? 12 : 8;
+  const min = 8;   // same minimum for instructors and students
   if (typeof pw !== 'string' || pw.length < min) return `Password must be at least ${min} characters.`;
   if (pw.length > 128) return 'Password is too long.';
   if (pw.toLowerCase() === String(user.username).toLowerCase()) return 'Password cannot be your username.';
@@ -96,9 +96,10 @@ function makeSessions(db, { ttlMs, secureCookie }) {
       const t = parseCookies(req.headers.cookie).sid;
       if (t) {
         req.user = await db.one(`
-          SELECT u.id, u.username, u.role, u.full_name AS "fullName", u.student_id AS "studentId", u.must_change_password AS "mustChange"
+          SELECT u.id, u.username, u.role, u.full_name AS "fullName", u.student_id AS "studentId",
+                 u.is_owner AS "isOwner", u.active, u.must_change_password AS "mustChange"
           FROM sessions s JOIN users u ON u.id = s.user_id
-          WHERE s.token_hash = $1 AND s.expires_at > now()`, [hash(t)]) || null;
+          WHERE s.token_hash = $1 AND s.expires_at > now() AND u.active`, [hash(t)]) || null;
       }
       next();
     },
