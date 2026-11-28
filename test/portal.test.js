@@ -396,7 +396,7 @@ test('postgres: case-sensitive IDs, uniqueness, health check, idempotent migrati
   // starting a second app on the same schema must not re-run migrations or fail
   const again = await createApp({ connectionString: DB_URL, schema: S.schema });
   const applied = await again.locals.db.all('SELECT name FROM schema_migrations');
-  assert.equal(applied.length, 4);
+  assert.equal(applied.length, 5);
   await again.locals.db.close();
 
   // the database itself rejects impossible grades, independent of application checks

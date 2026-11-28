@@ -9,8 +9,12 @@
     "create-teacher": "node scripts/create-teacher.js"
   },
   "dependencies": {
+    "@otplib/plugin-crypto-node": "^13.6.0",
+    "@otplib/uri": "^13.6.0",
     "express": "^5.3.0",
     "helmet": "^8.3.0",
+    "nodemailer": "^10.6.1",
+    "otplib": "^13.6.0",
     "pg": "^8.23.1"
   },
   "private": true,

@@ -6,13 +6,19 @@
 </head><body>
 <div class="login-shell">
   <main class="login-box">
-    <div class="head"><span class="wordmark">grade<span class="gold">portal</span></span><p>Sign in to view your grades</p></div>
+    <div class="head"><span class="wordmark">grade<span class="gold">portal</span></span><p id="subtitle">Sign in to view your grades</p></div>
     <form id="f" autocomplete="on">
-      <div class="field"><label for="u">User ID</label><input id="u" type="text" autocomplete="username" required autofocus></div>
-      <div class="field"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required></div>
-      <button class="btn" id="go" type="submit">Sign in</button>
+      <div id="password-step">
+        <div class="field"><label for="u">User ID</label><input id="u" type="text" autocomplete="username" required autofocus></div>
+        <div class="field"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required></div>
+        <button class="btn" id="go" type="submit">Sign in</button>
+      </div>
+      <div id="code-step" hidden>
+        <div class="field"><label for="code">Authenticator or backup code</label><input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required></div>
+        <button class="btn" id="code-go" type="submit">Verify code</button>
+      </div>
       <p class="msg" id="msg" role="alert"></p>
-      <p class="note">First time here? Use the temporary password from your instructor. Forgot your password? Ask your instructor to reset it.</p>
+      <p class="note" id="note">First time here? Use the temporary password from your instructor. Instructors: <a href="#forgot" id="forgot-link">Forgot password?</a></p>
     </form>
   </main>
 </div>

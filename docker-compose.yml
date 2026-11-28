@@ -34,6 +34,15 @@ services:
       COOKIE_SECURE: "true"            # users always arrive over HTTPS via Caddy
       TRUST_PROXY: "1"                 # exactly one proxy (Caddy) in front
       SESSION_HOURS: "8"
+      PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://${PORTAL_HOST:-grades.school.lan}}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      SMS_GATEWAY: ${SMS_GATEWAY:-}
+      SMS_GATEWAY_MODULE: ${SMS_GATEWAY_MODULE:-}
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

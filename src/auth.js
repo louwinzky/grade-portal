@@ -24,6 +24,9 @@ async function verifyPassword(pw, stored) {
 let dummy = null; // verified against for unknown usernames so timing doesn't reveal which accounts exist
 const dummyHash = async () => (dummy ||= hashPassword(crypto.randomBytes(12).toString('hex')));
 
+// Generic hash for high-entropy, one-time tokens/codes (recovery links, backup codes, challenges).
+const hashToken = value => crypto.createHash('sha256').update(String(value)).digest('hex');
+
 // No look-alike characters (0/O, 1/l/I) so temporary passwords survive being read off a printed slip
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 function tempPassword(len = 10) {
@@ -97,7 +100,8 @@ function makeSessions(db, { ttlMs, secureCookie }) {
       if (t) {
         req.user = await db.one(`
           SELECT u.id, u.username, u.role, u.full_name AS "fullName", u.student_id AS "studentId",
-                 u.is_owner AS "isOwner", u.active, u.must_change_password AS "mustChange"
+                 u.is_owner AS "isOwner", u.active, u.must_change_password AS "mustChange",
+                 u.totp_confirmed_at IS NOT NULL AS "twoFactor", u.email
           FROM sessions s JOIN users u ON u.id = s.user_id
           WHERE s.token_hash = $1 AND s.expires_at > now() AND u.active`, [hash(t)]) || null;
       }
@@ -106,4 +110,4 @@ function makeSessions(db, { ttlMs, secureCookie }) {
   };
 }
 
-module.exports = { hashPassword, verifyPassword, dummyHash, tempPassword, checkNewPassword, makeLimiter, makeSessions };
+module.exports = { hashPassword, verifyPassword, dummyHash, hashToken, tempPassword, checkNewPassword, makeLimiter, makeSessions };

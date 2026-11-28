@@ -89,6 +89,24 @@ The **first instructor created becomes the Owner**. The Owner (and any other ins
 
 Instructors who are not Owners do not see the management page, and the API rejects them with `403`.
 
+### Instructor account security
+
+Each instructor can open **Account security** from the avatar menu:
+
+- **Password recovery** — add an email address, then open the verification link sent by SMTP. After that,
+  **Forgot password?** on the sign-in page emails a single-use link valid for 30 minutes. Reset links are hashed
+  in the database, invalidate all sessions, and still require the second factor when 2FA is enabled. Students do
+  **not** get self-service recovery; their accounts remain teacher-managed.
+- **Two-factor sign-in** — optional TOTP authenticator app (Google Authenticator, Microsoft Authenticator,
+  Authy, 1Password, …). Enrollment shows the secret/URI, requires a valid code, and issues eight one-time backup
+  codes. Backup codes can be regenerated with the account password; turning 2FA off also requires the password.
+  Keep at least one backup code off the server.
+- **SMS** — provision-ready but **disabled**. No gateway is bundled or enabled by default; see `.env.example`.
+  Recovery remains email-only until a provider is explicitly configured and approved.
+
+If SMTP is not configured, recovery requests return the same neutral message and no email is sent; an Owner or
+shell operator can still reset an instructor.
+
 If nobody can sign in (e.g. the Owner is locked out), an operator with shell access can reset any instructor from the host:
 
 ```bash
@@ -101,7 +119,10 @@ It prints a one-time password, ends that instructor's sessions, forces a passwor
 
 - **Run Docker in a VM, not an LXC container.** Proxmox's own guidance is to run application containers in a QEMU VM; Docker inside LXC needs nesting and tends to break after updates. A Debian/Ubuntu VM with 2 vCPU, 2 GB RAM and 20 GB disk is plenty for a class.
 - **Backups, two layers:** (1) a scheduled Proxmox backup of the VM (Datacenter → Backup, to storage that is *not* on the same disk; Proxmox Backup Server if you have one); (2) the nightly database dump below, which restores on any PostgreSQL. Take a VM snapshot before upgrades. - **Network/firewall:** put the VM where students can reach it, allow inbound 443 (and 80 for the redirect), and limit SSH to your admin machine. PostgreSQL is **not** published: it lives on an internal Docker network that only the app can reach.
-- **Keep the clock correct** (NTP). Sessions and TLS depend on it. 
+- **Keep the clock correct** (NTP). Sessions, TOTP codes and TLS depend on it.
+- **Email:** fill `PORTAL_BASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM` in `.env`
+  before starting the stack if instructors should use self-service recovery. Without them the app still runs, but
+  no reset/verification email is sent.
 
 ## Operations
 
@@ -112,7 +133,8 @@ It prints a one-time password, ends that instructor's sessions, forces a passwor
 | Nightly backup (cron) | `0 2 * * * cd /opt/grade-portal && ./scripts/backup-db.sh >> backups/backup.log 2>&1` |
 | **Restore** | `./scripts/restore-db.sh backups/portal-XXXX.dump` (asks for confirmation, stops the app during restore) |
 | Reset a student's password | Instructor page → Students and accounts → Reset password |
-| Reset an instructor's password | Instructor page → Instructors → Reset password (Owner), or `docker compose exec app node scripts/reset-teacher-password.js <username>` |
+| Reset an instructor's password | Sign-in → **Forgot password?** (verified email), Instructor page → Instructors → Reset password (Owner), or `docker compose exec app node scripts/reset-teacher-password.js <username>` |
+| Enable/reset instructor 2FA | Instructor avatar → **Account security** |
 | Create / disable an instructor | Instructor page → Instructors (Owner only), or `scripts/create-teacher.js [--owner] <username> "<Full Name>"` |
 | Bulk-create instructors | Instructor page → Instructors → **Bulk add CSV** (Owner only; template available in the dialog) |
 | Stop everything | `docker compose down` (data stays in volumes; `down -v` would delete it) |
@@ -148,16 +170,17 @@ but not cached locally, so a normal refresh is enough after frontend edits in lo
 | Students can only query their own record; the API accepts no student identifier | `src/api.js` |
 | Teachers can only manage their own subjects; only Owners can manage instructor accounts | `src/api.js` |
 | Session cookie `HttpOnly` + `SameSite=Strict` + `Secure`; tokens stored hashed; password change/reset ends other sessions | `src/auth.js` |
+| Optional instructor TOTP 2FA with single-use backup codes; recovery links/challenges hashed and short-lived | `src/security-api.js`, `migrations/005_auth_security.sql` |
 | Login lockout (5 failures / 15 min per account, 40 per IP); same error for unknown user and wrong password | `src/app.js` |
+| Recovery lockout (5 requests / 15 min per username and IP); neutral response whether or not an account exists | `src/security-api.js` |
 | Same-origin + JSON-only writes (CSRF); strict CSP, no inline scripts, no external assets | `src/app.js` |
 | Parameterised SQL everywhere; database CHECK constraints reject impossible grades | `src/api.js`, `migrations/` |
 | Containers: app runs as non-root, read-only filesystem, all capabilities dropped; database on an internal-only network | `docker-compose.yml` |
 | Audit log of logins, imports, releases, account and password actions | `audit_log` table |
 
-Not covered: two-factor sign-in for instructors, email/SMS password recovery (an Owner or an operator with shell
-access must reset an instructor's password), protection from someone with access to the server or its backups,
-and an independent security review.
-Have your school IT or data privacy officer review this before students rely on it.
+Not covered: enabled SMS delivery (adapter only), protection from someone with access to the server or its backups,
+and an independent security review. Recovery/2FA rate limits are per-process in memory. Have your school IT or data
+privacy officer review this before students rely on it; see `docs/SECURITY-REVIEW.md` for the review packet.
 
 ## Data privacy
 
@@ -165,5 +188,6 @@ Grades are personal information under the Philippine Data Privacy Act (RA 10173)
 your department/registrar permits publishing grades outside the official system, review and adjust the
 privacy notice in `public/assets/student.js` (the "Privacy Notice" page), restrict access to the server and
 its backups, and decide how long records are kept. Only summary grades are stored here, never quiz/exam scores.
+Ready-to-send request drafts are in `docs/SECURITY-REVIEW-REQUEST.md` and `docs/REGISTRAR-PRIVACY-REQUEST.md`.
 
 See `docs/ARCHITECTURE.md` for the design, data model and known limitations.

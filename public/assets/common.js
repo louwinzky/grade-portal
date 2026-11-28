@@ -97,6 +97,7 @@
     const btn = h('button', { class: 'avatar', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': 'Account menu' }, initials(me.fullName));
     const menu = h('div', { class: 'menu', role: 'menu', hidden: true },
       h('div', { class: 'menu-head' }, h('strong', {}, me.fullName), h('span', {}, me.role === 'teacher' ? 'Instructor' : `Student no. ${me.username}`)),
+      me.role === 'teacher' ? h('button', { class: 'menu-item', role: 'menuitem', type: 'button', onclick: () => { close(); securityDialog().catch(() => {}); } }, icon('shield'), 'Account security') : null,
       h('button', { class: 'menu-item', role: 'menuitem', type: 'button', onclick: () => { close(); passwordDialog({ forced: false }); } }, icon('key'), 'Change password'),
       h('button', { class: 'menu-item', role: 'menuitem', type: 'button', onclick: signOut }, icon('logout'), 'Sign out'));
     const wrap = h('div', { class: 'menu-wrap' }, btn, menu);
@@ -156,5 +157,66 @@
     });
   }
 
-  window.App = { h, api, icon, wordmark, avatarMenu, topbar, navToggle, syncNavButtons, rememberDialogFocus, passwordDialog };
+  // Instructor account security: email recovery and TOTP + backup codes.
+  async function securityDialog() {
+    const state = await api('/api/me/security');
+    return new Promise(resolve => {
+      const msg = h('p', { class: 'msg', role: 'alert' });
+      const email = h('input', { type: 'email', placeholder: 'you@school.edu', id: 'sec-email' });
+      const code = h('input', { type: 'text', inputmode: 'numeric', maxlength: 6, placeholder: '6-digit code', id: 'sec-code' });
+      const pw = h('input', { type: 'password', placeholder: 'Your password', id: 'sec-pw' });
+      const dlg = h('dialog', {},
+        h('div', { class: 'dh' }, 'Account security'),
+        h('div', { class: 'db' },
+          h('h3', {}, 'Password recovery'),
+          h('p', { class: 'note' }, state.emailVerified ? `Verified email: ${state.email} · recovery is active.` : 'Add a verified email to use self-service password recovery.'),
+          state.emailVerified ? null : h('div', { class: 'field' }, h('label', { for: 'sec-email' }, 'Email address'), email),
+          state.emailVerified ? null : h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+            msg.className = 'msg'; msg.textContent = '';
+            try { await api('/api/me/email', { method: 'PUT', body: { email: email.value.trim() } }); msg.className = 'msg ok'; msg.textContent = 'Saved. Open the verification link sent to your email to finish.'; }
+            catch (err) { msg.className = 'msg err'; msg.textContent = err.message; }
+          } }, 'Save and send verification link'),
+          h('h3', {}, 'Two-factor sign-in'),
+          h('p', { class: 'note' }, state.twoFactor ? `Enabled · ${state.backupCodesLeft} backup codes remain.` : 'Use an authenticator app (Google, Microsoft, Authy, 1Password…).'),
+          state.twoFactor ? null : h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+            msg.className = 'msg'; msg.textContent = '';
+            try {
+              const r = await api('/api/me/2fa/start', { method: 'POST', body: {} });
+              const panel = dlg.querySelector('#enroll');
+              panel.replaceChildren(
+                h('p', { class: 'note' }, `Scan this URI in your authenticator app, or enter the secret manually: ${r.secret}`),
+                h('p', { class: 'note wrap-anywhere' }, r.uri),
+                h('div', { class: 'field' }, h('label', { for: 'sec-code' }, 'Code from app'), code),
+                h('button', { class: 'btn', type: 'button', onclick: async () => {
+                  try {
+                    const c = await api('/api/me/2fa/confirm', { method: 'POST', body: { code: code.value.trim() } });
+                    const list = h('ul', {}, ...c.backupCodes.map(x => h('li', {}, x)));
+                    panel.replaceChildren(h('p', { class: 'msg ok' }, 'Two-factor sign-in enabled. Save these backup codes somewhere safe; each works once:'), list);
+                    msg.className = 'msg ok'; msg.textContent = 'Enabled.';
+                  } catch (err) { msg.className = 'msg err'; msg.textContent = err.message; }
+                } }, 'Enable two-factor sign-in'));
+            } catch (err) { msg.className = 'msg err'; msg.textContent = err.message; }
+          } }, 'Set up authenticator app'),
+          state.twoFactor ? h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+            msg.className = 'msg'; msg.textContent = '';
+            try {
+              const c = await api('/api/me/2fa/backup-codes', { method: 'POST', body: { password: pw.value } });
+              const list = h('ul', {}, ...c.backupCodes.map(x => h('li', {}, x)));
+              dlg.querySelector('#enroll').replaceChildren(h('p', { class: 'msg ok' }, 'New backup codes (old ones no longer work):'), list);
+            } catch (err) { msg.className = 'msg err'; msg.textContent = err.message; }
+          } }, 'Regenerate backup codes') : null,
+          state.twoFactor ? h('div', { class: 'field' }, h('label', { for: 'sec-pw' }, 'Password (required to change 2FA)'), pw) : null,
+          state.twoFactor ? h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+            try { await api('/api/me/2fa/disable', { method: 'POST', body: { password: pw.value } }); dlg.close(); dlg.remove(); resolve(); }
+            catch (err) { msg.className = 'msg err'; msg.textContent = err.message; }
+          } }, 'Turn off two-factor sign-in') : null,
+          h('div', { id: 'enroll' }), msg),
+        h('div', { class: 'df' }, h('button', { class: 'btn', type: 'button', onclick: () => { dlg.close(); dlg.remove(); resolve(); } }, 'Done')));
+      rememberDialogFocus(dlg);
+      document.body.append(dlg);
+      dlg.showModal();
+    });
+  }
+
+  window.App = { h, api, icon, wordmark, avatarMenu, topbar, navToggle, syncNavButtons, rememberDialogFocus, passwordDialog, securityDialog };
 })();

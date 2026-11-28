@@ -50,7 +50,7 @@ echo "===== ENVIRONMENT TEMPLATE ====="
 cat .env.example
 
 echo "===== COMPOSE CONFIGURATION ====="
-cat compose.yaml
+cat docker-compose.yml
 
 echo "===== CADDY CONFIGURATION ====="
 cat Caddyfile
@@ -60,6 +60,12 @@ docker compose config --quiet
 echo "Compose exit code: $?"
 
 A result of 0 means Compose accepted the configuration.
+
+## Configure instructor recovery email (before go-live)
+Copy `.env.example` to `.env` and set `POSTGRES_PASSWORD`, `PORTAL_HOST`, and `PORTAL_BASE_URL` (the exact HTTPS URL
+instructors use). For recovery email, also set `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, and
+`MAIL_FROM`. If any of these are blank, the portal still starts but no verification/reset email is sent. SMS stays
+disabled unless a provider is explicitly approved and `SMS_GATEWAY`/`SMS_GATEWAY_MODULE` are set. Never commit `.env`.
 
 ## Updating CaddyFile, permits access from Management, Staff, and Student Wi-Fi networks.
 cd /opt/grade-portal

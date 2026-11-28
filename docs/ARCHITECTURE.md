@@ -74,6 +74,16 @@ link to the FAQ. It is intentionally *not* labelled GWA, because a true GWA is u
 and this portal only knows the subjects published here. The sidebar carries the signed-in identity, the top bar is
 shared with the instructor page, and **Print** uses a print stylesheet that hides navigation and controls.
 
+## Instructor security additions
+Instructor accounts can optionally add a verified email and TOTP second factor. `users` holds `email`,
+`email_verified_at`, `totp_secret`, and pending-enrollment columns; `recovery_codes`, `password_resets`, and
+`login_challenges` are separate tables (`migrations/005_auth_security.sql`). A correct password for a 2FA-enabled
+instructor creates a 10-minute `login_challenges` row instead of a session; `/api/login/2fa` accepts either a
+current TOTP code (±1 step) or one unused backup code, then creates the normal session. Recovery links are hashed
+with SHA-256, last 30 minutes, are single-use, and still issue a 2FA challenge after the password is changed.
+SMTP is generic and configured from `PORTAL_BASE_URL`/`SMTP_*`/`MAIL_FROM`; an SMS adapter exists but is disabled
+by default. Rate limits for these flows are in memory, like the login limiter.
+
 ## Known limitations / next steps
 - **Student names are global by Student ID.** A re-import updates the stored name. Fine with one instructor;
   with several, restrict renames or add a registrar-owned student table.
@@ -81,10 +91,12 @@ shared with the instructor page, and **Print** uses a print stylesheet that hide
   more than one app container.
 - **The app's database role owns the schema** (it runs migrations). A stricter setup uses a separate migration
   role and gives the runtime role only DML rights.
-- **No self-service password reset.** The instructor resets it (by design, avoids email infrastructure).
-  Lockout also lets someone lock a classmate's account for 15 minutes.
-- **No 2FA** for instructor accounts. Worth adding if the portal holds more than one subject's grades.
+- **Students have no self-service password reset** by design; a teacher resets student accounts. Student lockout
+  also lets someone lock a classmate's account for 15 minutes.
+- **Instructor email/SMS/2FA rate limits are per-process memory**, so a multi-replica deployment would need a shared
+  store. This deployment uses one app container.
+- **SMS is not enabled**; the adapter is a seam for a future, privacy-approved gateway.
 - **Docker files were not run in a Docker daemon during development** (none was available); the application and
   its PostgreSQL behaviour were tested against a real PostgreSQL server, the container configuration was reviewed
   but not executed. Expect to confirm `docker compose up` on your host.
-- **Not independently security-reviewed.**
+- **Not independently security-reviewed.** `docs/SECURITY-REVIEW.md` is the handoff packet, not a review result.

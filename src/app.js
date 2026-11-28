@@ -1,10 +1,14 @@
 'use strict';
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const { openDb } = require('./db');
 const A = require('./auth');
 const { mountApi } = require('./api');
+const { mountSecurityApi } = require('./security-api');
+const { createMailer } = require('./mailer');
+const { createSmsGateway } = require('./sms');
 
 async function createApp(opts = {}) {
   const cfg = {
@@ -84,6 +88,14 @@ async function createApp(opts = {}) {
       return res.status(401).json({ error: 'invalid', message: 'Invalid username or password.' });
     }
     userLimiter.reset(uKey);
+    // Instructors with TOTP get a short-lived challenge instead of a session until the code is verified.
+    if (user.role === 'teacher' && user.totp_confirmed_at) {
+      const challenge = crypto.randomBytes(32).toString('base64url');
+      await db.query('DELETE FROM login_challenges WHERE expires_at < now()');
+      await db.query('INSERT INTO login_challenges (token_hash, user_id, expires_at, ip) VALUES ($1,$2,now() + make_interval(mins => $3),$4)',
+        [A.hashToken(challenge), user.id, 10, req.ip || null]);
+      return res.json({ secondFactor: true, challenge, role: 'teacher' });
+    }
     await sessions.create(res, user.id, req.ip);
     await audit(user.id, 'login', null, req.ip);
     res.json({ role: user.role, mustChangePassword: user.must_change_password });
@@ -114,6 +126,16 @@ async function createApp(opts = {}) {
     res.json({ ok: true });
   });
 
+  // Temporary-password gate must also allow second-factor completion and security setup after a reset.
+  const mailer = opts.mailer || createMailer(process.env);
+  const smsGateway = opts.smsGateway || createSmsGateway(process.env);
+  app.use('/api', (req, res, next) => {
+    if (req.user && req.user.mustChange && !['/me', '/change-password', '/logout', '/me/security', '/me/email', '/me/email/verify', '/me/2fa/start', '/me/2fa/confirm', '/me/2fa/disable', '/me/2fa/backup-codes'].includes(req.path))
+      return res.status(403).json({ error: 'password_change_required', message: 'Please change your temporary password first.' });
+    next();
+  });
+  // Recovery and challenge routes must be reachable while signed out, so mount them before the generic 404.
+  mountSecurityApi(app, { db, need, audit, sessions, mailer, smsGateway });
   mountApi(app, { db, need, audit, sessions });
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found', message: 'Not found.' }));
@@ -123,12 +145,15 @@ async function createApp(opts = {}) {
   const home = u => (u.role === 'teacher' ? '/admin' : '/student');
   const page = (file, role) => (req, res) => {
     if (role && (!req.user || req.user.role !== role)) return res.redirect('/login');
-    if (!role && req.user) return res.redirect(home(req.user));
+    // Verification links are normally opened in the same browser the instructor is signed into.
+    if (!role && req.user && file !== 'verify-email.html') return res.redirect(home(req.user));
     res.set('Cache-Control', 'no-store');
     res.sendFile(path.join(pub, file));
   };
   app.get('/', (req, res) => res.redirect(req.user ? home(req.user) : '/login'));
   app.get('/login', page('login.html'));
+  app.get('/reset-password', page('reset-password.html'));
+  app.get('/verify-email', page('verify-email.html'));
   app.get('/student', page('student.html', 'student'));
   app.get('/admin', page('admin.html', 'teacher'));
   // Cache assets in production; keep local preview refreshes instant (Docker sets NODE_ENV=production).

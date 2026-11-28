@@ -151,6 +151,7 @@ select{min-width:260px;font-size:16px}
 .field{display:flex;flex-direction:column;gap:5px;margin-bottom:16px}
 .field label{font-weight:600;font-size:13.5px}
 .msg{min-height:1.3em;font-size:14px;margin:8px 0 0}.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
+.wrap-anywhere{overflow-wrap:anywhere}
 
 /* ---------- login ---------- */
 .login-shell{min-height:100vh;display:flex;flex-direction:column;background-color:var(--bg);background-image:radial-gradient(rgba(20,30,50,.06) 1px,transparent 1.2px);background-size:7px 7px}
