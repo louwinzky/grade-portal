@@ -44,14 +44,25 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
    with **Edit subject**; that does not move students or grades. Use the **School year & term** selector in the
    sidebar to filter subjects, and the **Search subjects** box to filter by title, code, section or term. With
    **All terms** selected, subjects are grouped under their term headings; **New subject** starts with the
-   selected term filled in. Wrong subject? **Delete** removes it and its imported grades after confirmation —
-   student accounts and other subjects are not affected.
-2. In the gradebook, open the section → **Registrar Report (CSV)**. Upload it → **Check file** → **Import**.
-   Every student needs a **Student ID** in the gradebook; rows without one are skipped and listed.
+   selected term filled in. The dashboard opens on an **Overview** with one card per subject: release progress,
+   enrolled students, students still without accounts and the last import time. Sidebar badges show release progress, empty subjects and pending accounts at a glance. Wrong subject? **Delete** removes
+   it and its imported grades after confirmation — student accounts and other subjects are not affected.
+2. In the gradebook, open the section → **Registrar Report (CSV)**. Choose the file or drag it onto the import
+   box → **Check file** → **Import**. Every student needs a **Student ID** in the gradebook; rows without one are
+   skipped and listed. The subject header and Overview show when the last successful import happened. A sticky
+   **Publish / Release / Students / Activity** bar jumps between sections of the long subject page.
 3. **Create accounts**: usernames are Student IDs, each student gets a one-time temporary password
    (shown once, downloadable as CSV). Hand them out privately. Students must choose their own at first sign-in.
 4. Tick **Prelim / Midterm / Pre-Finals / Finals** when you want students to see each period.
-   The Final Grade appears only after all four are released. Re-import any time to update grades.
+   The Final Grade appears only after all four are released. **Release all** and **Copy from subject** set all four
+   flags at once after confirmation. In **Students and accounts**, search by name/Student ID, filter by account
+   status, or copy a username with one click. Re-import any time to update grades.
+
+Students sign in with their Student ID, see only released periods, and can use **Print** for a clean
+print/save-as-PDF copy of their grades (navigation, filters and buttons are left out of the printout). The student
+sidebar shows who is signed in, and **How averages work** beside Term/Overall Avg jumps to the FAQ explanation.
+The term/summary bar stays visible while long grade lists scroll, and switching between Grades, FAQs and Privacy
+starts at the top.
 
 `docs/sample-registrar-report.csv` is a real export from the gradebook you can try first.
 
@@ -60,9 +71,7 @@ Stack: Node 22 + Express, PostgreSQL 17, Caddy (HTTPS), all in Docker Compose.
 The **first instructor created becomes the Owner**. The Owner (and any other instructor they promote) sees an
 **Instructors** item in the dashboard sidebar and can manage up to ~50 accounts there:
 
-- **New instructor** — username, full name and optional Owner access. A random temporary password is generated
-  and shown **once** (copy it or download the CSV before closing the dialog). They must choose their own password
-  at first sign-in. Usernames are **case-sensitive** (`Prof` and `prof` are different accounts) and must be unique.
+- **New instructor** — username, full name and optional Owner access. A random temporary password is generated and shown **once** (copy it or download the CSV before closing the dialog). They must choose their own password at first sign-in. Usernames are **case-sensitive** (`Prof` and `prof` are different accounts) and must be unique.
   Passwords must be at least 8 characters.
 - **Reset password** — issues a new temporary password, signs the instructor out everywhere and forces another
   password change at next sign-in. Use this when they forget their password. **You cannot reset yourself here**:
@@ -72,37 +81,31 @@ The **first instructor created becomes the Owner**. The Owner (and any other ins
   are kept. Re-enable to let them back in with their existing password.
 - **Make owner / Remove owner** — owners can create and manage accounts. At least one active Owner is always kept;
   you cannot disable or demote yourself.
+- **Bulk add CSV** — upload a `Username, Full name` CSV with an optional `Owner` column to onboard several
+  instructors at once. Download the template if needed. Invalid, duplicate and existing usernames are skipped and
+  reported line by line; every created account gets its own one-time password, shown only once and downloadable.
+- **Copy list / Export CSV** — copy the instructor list to the clipboard as tab-separated text, or download it as
+  a CSV for record-keeping (username, name, status, access, subject count and last login).
 
 Instructors who are not Owners do not see the management page, and the API rejects them with `403`.
 
-If nobody can sign in (e.g. the Owner is locked out), an operator with shell access can reset any instructor
-from the host:
+If nobody can sign in (e.g. the Owner is locked out), an operator with shell access can reset any instructor from the host:
 
 ```bash
 docker compose exec app node scripts/reset-teacher-password.js prof
 ```
-
-It prints a one-time password, ends that instructor's sessions, forces a password change and writes an audit
-entry. To create another instructor from the shell, use
+It prints a one-time password, ends that instructor's sessions, forces a password change and writes an audit entry. To create another instructor from the shell, use
 `docker compose exec app node scripts/create-teacher.js [--owner] <username> "<Full Name>"`.
 
 ## Proxmox notes
 
-- **Run Docker in a VM, not an LXC container.** Proxmox's own guidance is to run application containers in a
-  QEMU VM; Docker inside LXC needs nesting and tends to break after updates. A Debian/Ubuntu VM with
-  2 vCPU, 2 GB RAM and 20 GB disk is plenty for a class.
-- **Backups, two layers:** (1) a scheduled Proxmox backup of the VM (Datacenter → Backup, to storage that is
-  *not* on the same disk; Proxmox Backup Server if you have one); (2) the nightly database dump below, which
-  restores on any PostgreSQL. Take a VM snapshot before upgrades.
-- **Network/firewall:** put the VM where students can reach it, allow inbound 443 (and 80 for the redirect),
-  and limit SSH to your admin machine. PostgreSQL is **not** published: it lives on an internal Docker network
-  that only the app can reach.
-- **Keep the clock correct** (NTP). Sessions and TLS depend on it.
+- **Run Docker in a VM, not an LXC container.** Proxmox's own guidance is to run application containers in a QEMU VM; Docker inside LXC needs nesting and tends to break after updates. A Debian/Ubuntu VM with 2 vCPU, 2 GB RAM and 20 GB disk is plenty for a class.
+- **Backups, two layers:** (1) a scheduled Proxmox backup of the VM (Datacenter → Backup, to storage that is *not* on the same disk; Proxmox Backup Server if you have one); (2) the nightly database dump below, which restores on any PostgreSQL. Take a VM snapshot before upgrades. - **Network/firewall:** put the VM where students can reach it, allow inbound 443 (and 80 for the redirect), and limit SSH to your admin machine. PostgreSQL is **not** published: it lives on an internal Docker network that only the app can reach.
+- **Keep the clock correct** (NTP). Sessions and TLS depend on it. 
 
 ## Operations
 
-| Task | Command (run in the project folder) |
-|---|---|
+| Task | Command (run in the project folder) ||---|---|
 | Status / logs | `docker compose ps` · `docker compose logs -f app` |
 | Update the app | replace files, then `docker compose up -d --build` (migrations apply on start) |
 | **Backup** | `./scripts/backup-db.sh` → `backups/portal-*.dump` (keeps the newest 30) |
@@ -111,6 +114,7 @@ entry. To create another instructor from the shell, use
 | Reset a student's password | Instructor page → Students and accounts → Reset password |
 | Reset an instructor's password | Instructor page → Instructors → Reset password (Owner), or `docker compose exec app node scripts/reset-teacher-password.js <username>` |
 | Create / disable an instructor | Instructor page → Instructors (Owner only), or `scripts/create-teacher.js [--owner] <username> "<Full Name>"` |
+| Bulk-create instructors | Instructor page → Instructors → **Bulk add CSV** (Owner only; template available in the dialog) |
 | Stop everything | `docker compose down` (data stays in volumes; `down -v` would delete it) |
 
 Copy `backups/` to another machine regularly. A backup that lives only on the same server is not a backup.

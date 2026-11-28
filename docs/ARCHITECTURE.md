@@ -40,14 +40,15 @@ hashing/sessions/lockout, `src/csv.js` importer, `src/db.js` pool, transactions 
 - `students(student_no, full_name)`: identity from the school's Student ID; unique and case-sensitive.
 - `users(username, password_hash, role teacher|student, student_id UNIQUE, must_change_password, is_owner, active)`:
   at most one account per student; usernames are unique and case-sensitive (`Prof` ≠ `prof`).
-- `subjects(owner_id, code, title, term, section, rel_prelim, rel_midterm, rel_prefinal, rel_finals)`:
-  the `rel_*` booleans are the release switches.
+- `subjects(owner_id, code, title, term, section, rel_prelim, rel_midterm, rel_prefinal, rel_finals, last_import_at)`:
+  the `rel_*` booleans are the release switches; `last_import_at` drives the Overview/header import note.
 - `enrollments(subject_id, student_id, prelim, midterm, prefinal, finals, final_pct, final_gp, remark)`:
   `NUMERIC` grades with `CHECK` ranges; `final_pct` is instructor-view only. `UNIQUE (subject_id, student_id)`.
 - `sessions(token_hash, user_id, expires_at)`, `audit_log(...)`, `schema_migrations(name)`.
 
 Schema changes are numbered SQL files in `migrations/`, applied once in order at startup under a PostgreSQL
-advisory lock (safe if two instances start together). To change the schema, add `002_*.sql`; never edit an applied file.
+advisory lock (safe if two instances start together). Migrations `001`–`004` are applied in this preview; to change
+the schema, add the next numbered file and never edit an applied file.
 
 ## Request flows
 - **Publish**: gradebook "Registrar Report (CSV)" -> instructor page -> `POST /subjects/:id/import`
@@ -55,7 +56,10 @@ advisory lock (safe if two instances start together). To change the schema, add 
 - **Student view**: `GET /api/student/grades` -> rows for `req.user.studentId` only -> unreleased periods are
   nulled **on the server** -> Final Grade only when all four periods are released.
 - **Accounts**: the instructor creates accounts for enrolled students; random temporary passwords are returned
-  once; until changed, a session can only call `/me`, `/change-password`, `/logout`.
+  once; until changed, a session can only call `/me`, `/change-password`, `/logout`. Owners can also create/reset/
+  disable/promote instructors individually or bulk-create them from CSV (`POST /api/admin/teachers/bulk`), with all
+  rows validated before any write and bad rows reported by line. Release helpers (`PUT /subjects/:id/releases`)
+  are just batched updates of the same `rel_*` flags and are audited like individual switches.
 
 ## Authorization rules
 1. No session -> 401. Wrong role -> 403.
@@ -64,9 +68,11 @@ advisory lock (safe if two instances start together). To change the schema, add 
 
 ## Student dashboard
 Top bar (menu, wordmark, account avatar), left sidebar (Grades, FAQs, Privacy Notice), term selector, and one
-card per subject with the period band and a Final Grade pill. The header shows a **Term Avg / Overall Avg**:
-a simple average of released Final Grades (dropped subjects excluded). It is intentionally *not* labelled GWA,
-because a true GWA is unit-weighted across every subject, and this portal only knows the subjects published here.
+card per subject with an accessible period `<table>` and a Final Grade pill. The header shows a **Term Avg /
+Overall Avg**: a simple average of released Final Grades (dropped subjects excluded), with a **How averages work**
+link to the FAQ. It is intentionally *not* labelled GWA, because a true GWA is unit-weighted across every subject,
+and this portal only knows the subjects published here. The sidebar carries the signed-in identity, the top bar is
+shared with the instructor page, and **Print** uses a print stylesheet that hides navigation and controls.
 
 ## Known limitations / next steps
 - **Student names are global by Student ID.** A re-import updates the stored name. Fine with one instructor;

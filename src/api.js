@@ -1,11 +1,39 @@
 'use strict';
 const A = require('./auth');
 const { PERIODS, isUniqueViolation } = require('./db');
-const { parseRegistrarCsv } = require('./csv');
+const { parseRegistrarCsv, parseCSV } = require('./csv');
 
 class Rollback extends Error {}
 const text = (v, min, max) => (typeof v === 'string' && v.trim().length >= min && v.trim().length <= max ? v.trim() : null);
 const toId = v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n < 2_147_483_647 ? n : null; };
+
+// CSV for onboarding instructors: "Username, Full name" with an optional Owner column.
+// Rows are validated in full before anything is written; bad rows are reported, not applied.
+function parseTeacherCsv(csv) {
+  const rows = parseCSV(csv);
+  const norm = s => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+  const hi = rows.findIndex(r => r.some(c => norm(c) === 'username') && r.some(c => norm(c) === 'full name'));
+  if (hi < 0) throw new Error('Could not find a header row with "Username" and "Full name".');
+  const header = rows[hi].map(norm);
+  const iUser = header.indexOf('username'), iName = header.indexOf('full name'), iOwner = header.indexOf('owner');
+  const out = [], errors = [], seen = new Set();
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.every(c => !String(c).trim())) continue;
+    const line = i + 1;
+    try {
+      const username = String(r[iUser] || '').trim();
+      const fullName = String(r[iName] || '').trim();
+      if (!/^[A-Za-z0-9._-]{2,64}$/.test(username)) throw new Error('Username must be 2-64 letters, digits, dot, underscore or hyphen');
+      if (!fullName || fullName.length > 80) throw new Error('Full name is required (max 80 characters)');
+      if (seen.has(username)) throw new Error('duplicate username in file');
+      seen.add(username);
+      const owner = iOwner >= 0 && /^(true|yes|1|owner)$/i.test(String(r[iOwner] || '').trim());
+      out.push({ line, username, fullName, owner });
+    } catch (e) { errors.push({ line, reason: e.message }); }
+  }
+  return { rows: out, errors };
+}
 
 function mountApi(app, { db, need, audit, sessions }) {
   // ================= STUDENT: read-only, own grades, released periods only =================
@@ -42,9 +70,16 @@ function mountApi(app, { db, need, audit, sessions }) {
 
   app.get('/api/admin/subjects', need('teacher'), async (req, res) => {
     const rows = await db.all(`
-      SELECT s.*, (SELECT COUNT(*) FROM enrollments WHERE subject_id = s.id)::int AS enrolled
+      SELECT s.*,
+             (SELECT COUNT(*) FROM enrollments e WHERE e.subject_id = s.id)::int AS enrolled,
+             (SELECT COUNT(*) FROM enrollments e WHERE e.subject_id = s.id
+                AND NOT EXISTS (SELECT 1 FROM users u WHERE u.student_id = e.student_id))::int AS "accountsPending"
       FROM subjects s WHERE owner_id = $1 ORDER BY s.term DESC, s.title`, [req.user.id]);
-    res.json(rows.map(s => ({ id: s.id, code: s.code, title: s.title, term: s.term, section: s.section, enrolled: s.enrolled, released: relObj(s) })));
+    res.json(rows.map(s => ({
+      id: s.id, code: s.code, title: s.title, term: s.term, section: s.section,
+      enrolled: s.enrolled, accountsPending: s.accountsPending,
+      lastImportAt: s.last_import_at || null, released: relObj(s),
+    })));
   });
 
   app.post('/api/admin/subjects', need('teacher'), async (req, res) => {
@@ -99,7 +134,8 @@ function mountApi(app, { db, need, audit, sessions }) {
              (u.id IS NOT NULL) AS "hasAccount"
       FROM enrollments e JOIN students st ON st.id = e.student_id LEFT JOIN users u ON u.student_id = st.id
       WHERE e.subject_id = $1 ORDER BY st.full_name`, [s.id]);
-    res.json({ id: s.id, code: s.code, title: s.title, term: s.term, section: s.section, released: relObj(s), students });
+    res.json({ id: s.id, code: s.code, title: s.title, term: s.term, section: s.section,
+      lastImportAt: s.last_import_at || null, released: relObj(s), students });
   });
 
   app.put('/api/admin/subjects/:id/releases', need('teacher'), async (req, res) => {
@@ -145,6 +181,7 @@ function mountApi(app, { db, need, audit, sessions }) {
           if (up.inserted) stats.newEnrollments++; else stats.updatedEnrollments++;
         }
         if (dryRun) throw new Rollback();
+        await q.query('UPDATE subjects SET last_import_at = now() WHERE id = $1', [s.id]);
       });
     } catch (e) { if (!(e instanceof Rollback)) throw e; }
     if (!dryRun) await audit(req.user.id, 'grades_imported', `${s.code} ${s.term}: ${stats.rows} rows, ${parsed.errors.length} skipped`, req.ip);
@@ -224,6 +261,38 @@ function mountApi(app, { db, need, audit, sessions }) {
       if (isUniqueViolation(e)) return res.status(409).json({ error: 'exists', message: 'That username is already in use.' });
       throw e;
     }
+  });
+
+  // Bulk onboarding from a CSV of usernames and names. One temporary password per row, shown once.
+  app.post('/api/admin/teachers/bulk', needOwner, async (req, res) => {
+    const csv = (req.body || {}).csv;
+    if (typeof csv !== 'string' || !csv.trim()) return res.status(400).json({ error: 'bad_request', message: 'No CSV content received.' });
+    let parsed;
+    try { parsed = parseTeacherCsv(csv); } catch (e) { return res.status(400).json({ error: 'bad_csv', message: e.message }); }
+
+    const MAX_TEACHERS = 50;
+    const current = await db.all("SELECT username FROM users WHERE role = 'teacher'");
+    if (current.length + parsed.rows.length > MAX_TEACHERS)
+      return res.status(400).json({ error: 'too_many', message: `This portal supports up to ${MAX_TEACHERS} instructor accounts. The file would create too many.` });
+
+    const existing = new Set(current.map(t => t.username));
+    const created = [], errors = [...parsed.errors];
+    for (const row of parsed.rows) {
+      if (existing.has(row.username)) { errors.push({ line: row.line, reason: 'username already exists' }); continue; }
+      const pw = A.tempPassword(16);
+      try {
+        await db.query(
+          "INSERT INTO users (username, password_hash, role, full_name, is_owner, must_change_password) VALUES ($1,$2,'teacher',$3,$4,true)",
+          [row.username, await A.hashPassword(pw), row.fullName, row.owner]);
+        existing.add(row.username);
+        created.push({ username: row.username, fullName: row.fullName, isOwner: row.owner, tempPassword: pw });
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+        errors.push({ line: row.line, reason: 'username already exists' });
+      }
+    }
+    if (created.length) await audit(req.user.id, 'teachers_bulk_created', `${created.length} account(s)`, req.ip);
+    res.json({ created, errors, totalTeachers: current.length + created.length });
   });
 
   app.post('/api/admin/teachers/:id/reset-password', needOwner, async (req, res) => {

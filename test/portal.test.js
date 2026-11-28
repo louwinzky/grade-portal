@@ -94,6 +94,10 @@ test('end-to-end: publish, release, student view, isolation', needDb, async (t) 
   assert.equal((await S.db.one('SELECT COUNT(*)::int AS c FROM students')).c, 0, 'dry run must not save anything');
   const real = await teacher.post(`/api/admin/subjects/${id}/import`, { csv: SAMPLE });
   assert.equal(real.json.newStudents, 3);
+  const afterImport = await teacher.get(`/api/admin/subjects/${id}`);
+  assert.ok(afterImport.json.lastImportAt, 'successful import records its timestamp');
+  const listAfterImport = (await teacher.get('/api/admin/subjects')).json.find(x => x.id === id);
+  assert.equal(listAfterImport.accountsPending, 3, 'overview counts students without accounts');
   // re-import is an update, not a duplicate
   const again = await teacher.post(`/api/admin/subjects/${id}/import`, { csv: SAMPLE });
   assert.equal(again.json.newStudents, 0);
@@ -102,6 +106,7 @@ test('end-to-end: publish, release, student view, isolation', needDb, async (t) 
   // accounts
   const acc = await teacher.post(`/api/admin/subjects/${id}/accounts`, {});
   assert.equal(acc.json.created.length, 3);
+  assert.equal((await teacher.get('/api/admin/subjects')).json.find(x => x.id === id).accountsPending, 0);
   const juan = acc.json.created.find(c => c.studentNo === '2023-0101');
   const maria = acc.json.created.find(c => c.studentNo === '2023-0102');
   assert.ok(juan.tempPassword.length >= 10);
@@ -289,6 +294,46 @@ test('teacher management: owners create, reset, disable and promote instructors'
   assert.ok(actions.includes('owner_granted'));
 });
 
+test('bulk instructor onboarding from CSV', needDb, async (t) => {
+  const S = await boot();
+  t.after(S.close);
+  await S.addTeacher('owner', 'Owner Teacher');
+  await S.addTeacher('plain', 'Plain Teacher');
+  const owner = S.client();
+  await owner.post('/api/login', { username: 'owner', password: 'teacher-pass-1234' });
+
+  const csv = [
+    'Username,Full name,Owner',
+    'bulk.one,Bulk One,no',
+    'bulk-two,Bulk Two,yes',
+    'owner,Duplicate Owner,no',
+    'bad user,Bad Username,no',
+    'bulk.one,Duplicate In File,no',
+    'bulk.three,Bulk Three,',
+  ].join('\r\n');
+  const r = await owner.post('/api/admin/teachers/bulk', { csv });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.created.length, 3, 'valid rows are created');
+  assert.equal(r.json.created.find(x => x.username === 'bulk-two').isOwner, true, 'Owner column is honoured');
+  for (const c of r.json.created) assert.ok(c.tempPassword.length >= 16);
+  assert.equal(r.json.errors.length, 3, 'bad, duplicate and existing rows are reported');
+  assert.match(r.json.errors.map(e => e.reason).join(' '), /already exists/);
+  assert.equal(r.json.totalTeachers, 5, 'two existing plus three new accounts');
+
+  // case-sensitive uniqueness still applies, and the accounts force a password change
+  assert.equal((await owner.post('/api/admin/teachers/bulk', { csv: 'Username,Full name\nBULK.ONE,Case Variant\n' })).json.created.length, 1);
+  const nc = S.client();
+  assert.equal((await nc.post('/api/login', { username: 'bulk.one', password: r.json.created[0].tempPassword })).json.mustChangePassword, true);
+
+  // guards
+  assert.equal((await owner.post('/api/admin/teachers/bulk', { csv: 'Name,Full name\nx,X\n' })).status, 400);
+  assert.equal((await owner.post('/api/admin/teachers/bulk', { csv: 'Username,Full name\n' })).status, 200);
+  const plain = S.client();
+  await plain.post('/api/login', { username: 'plain', password: 'teacher-pass-1234' });
+  assert.equal((await plain.post('/api/admin/teachers/bulk', { csv })).status, 403);
+  assert.ok((await owner.get('/api/admin/audit')).json.some(a => a.action === 'teachers_bulk_created'));
+});
+
 test('login hardening, CSRF and headers', needDb, async (t) => {
   const S = await boot();
   t.after(S.close);
@@ -351,7 +396,7 @@ test('postgres: case-sensitive IDs, uniqueness, health check, idempotent migrati
   // starting a second app on the same schema must not re-run migrations or fail
   const again = await createApp({ connectionString: DB_URL, schema: S.schema });
   const applied = await again.locals.db.all('SELECT name FROM schema_migrations');
-  assert.equal(applied.length, 3);
+  assert.equal(applied.length, 4);
   await again.locals.db.close();
 
   // the database itself rejects impossible grades, independent of application checks

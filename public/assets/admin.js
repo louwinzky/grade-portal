@@ -1,6 +1,6 @@
 'use strict';
 (async function () {
-  const { h, api, icon, topbar, passwordDialog } = App;
+  const { h, api, icon, topbar, passwordDialog, rememberDialogFocus } = App;
   const me = await api('/api/me');
   document.getElementById('top').append(topbar(me, { menu: true }));
   if (me.mustChangePassword) await passwordDialog({ forced: true });
@@ -13,21 +13,27 @@
   const none = h('p', { class: 'nav-empty', hidden: true }, 'No subjects yet.');
   const newBtn = h('button', { class: 'nav-btn', type: 'button' }, icon('plus'), 'New subject');
   newBtn.addEventListener('click', openNew);
+  const overviewBtn = h('button', { class: 'nav-btn', type: 'button', onclick: openOverview }, icon('grid'), 'Overview');
   const teachersBtn = me.isOwner
     ? h('button', { class: 'nav-btn', type: 'button', onclick: openTeachers }, icon('users'), 'Instructors')
     : null;
+  // Only this middle region scrolls; the term filters and signed-in footer stay put.
+  const sideScroll = h('div', { class: 'side-scroll' },
+    overviewBtn,
+    h('div', { class: 'nav-head' }, 'Subjects'),
+    listEl, none, newBtn,
+    ...(teachersBtn ? [h('div', { class: 'nav-head' }, 'Administration'), teachersBtn] : []));
   nav.append(
     h('div', { class: 'side-filters' },
       h('div', { class: 'side-label' }, 'School year & term'),
       h('div', { class: 'term-select' }, termSel),
       h('div', { class: 'side-search' }, subjectSearch)),
-    h('div', { class: 'nav-head' }, 'Subjects'),
-    listEl, none, newBtn,
-    ...(teachersBtn ? [h('div', { class: 'nav-head' }, 'Administration'), teachersBtn] : []),
+    sideScroll,
     h('div', { class: 'nav-foot' }, h('span', {}, 'Signed in as'),
       h('strong', {}, me.fullName + (me.isOwner ? ' · Owner' : ''))));
 
-  let subjects = [], currentId = null, view = 'subject', currentTerm = '', setNewTerm = null, renderToken = 0;
+  let subjects = [], currentId = null, view = 'overview', currentTerm = '', setNewTerm = null, renderToken = 0;
+  let lastImport = null;   // { subjectId, rows, at } — shown once after a successful import
   const matchesSearch = s => {
     const q = subjectSearch.value.trim().toLowerCase();
     return !q || [s.title, s.code, s.term, s.section].join(' ').toLowerCase().includes(q);
@@ -55,8 +61,12 @@
       if (!inTerm.length) { openNew(); return; }
     }
     renderSidebar();
+    if (view === 'overview') renderOverview();
   });
-  subjectSearch.addEventListener('input', renderSidebar);
+  subjectSearch.addEventListener('input', () => {
+    renderSidebar();
+    if (view === 'overview') renderOverview();
+  });
 
   const SEM_ORDER = { '1st Semester': 1, '2nd Semester': 2, 'Summer': 3 };
   function termSortKey(term) {
@@ -70,8 +80,13 @@
     return String(ka[2]).localeCompare(String(kb[2]));
   }
   function subjectItem(s) {
+    const released = PERIODS.filter(([k]) => s.released[k]).length;
+    const badges = h('span', { class: 'side-badges' },
+      h('span', { class: 'badge ' + (released === 4 ? 'ok' : '') }, `${released}/4 released`),
+      s.enrolled === 0 ? h('span', { class: 'badge off' }, 'No students')
+        : s.accountsPending ? h('span', { class: 'badge owner' }, `${s.accountsPending} pending`) : null);
     const btn = h('button', { type: 'button', class: 'side-item', onclick: () => openSubject(s.id) },
-      h('span', { class: 'side-title' }, s.title),
+      h('span', { class: 'side-title' }, s.title), badges,
       h('small', {}, [s.code, s.term, s.section, `${s.enrolled} student${s.enrolled === 1 ? '' : 's'}`].filter(Boolean).join(' · ')));
     setCurrent(btn, view === 'subject' && s.id === currentId);
     return h('li', {}, btn);
@@ -97,6 +112,7 @@
     none.textContent = subjects.length === 0 ? 'No subjects yet.'
       : subjectSearch.value.trim() ? 'No subjects match your search.' : 'No subjects in this term.';
     setCurrent(newBtn, view === 'new');
+    setCurrent(overviewBtn, view === 'overview');
     if (teachersBtn) setCurrent(teachersBtn, view === 'teachers');
   }
 
@@ -106,7 +122,86 @@
     renderSidebar();
   }
 
+  const fmtDateTime = iso => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return isNaN(d) ? '—' : d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const loadingPanel = text => h('section', { class: 'panel' }, h('p', { class: 'loading', role: 'status' }, text));
+
+  function toast(message, kind = 'err') {
+    const el = h('div', { class: `toast ${kind}`, role: 'status' }, message);
+    document.body.append(el);
+    setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 200); }, 3800);
+  }
+
+  async function copyText(value) {
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(value); return true; } } catch (_) { /* fall through */ }
+    try {
+      const ta = h('textarea', { 'aria-hidden': 'true' });
+      ta.value = value; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.append(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove(); return ok;
+    } catch (_) { return false; }
+  }
+
+  async function openOverview() {
+    const token = ++renderToken;
+    currentId = null; view = 'overview'; setNewTerm = null;
+    renderSidebar(); closeNav();
+    detail.replaceChildren(loadingPanel('Loading overview…'));
+    await loadSubjects();
+    if (token !== renderToken) return;
+    renderOverview();
+  }
+
+  function renderOverview() {
+    const visible = visibleSubjects();
+    const students = visible.reduce((n, s) => n + s.enrolled, 0);
+    const released = visible.reduce((n, s) => n + PERIODS.filter(([k]) => s.released[k]).length, 0);
+    const pending = visible.reduce((n, s) => n + (s.accountsPending || 0), 0);
+    const stat = (label, value) => h('div', { class: 'stat' }, h('b', {}, value), h('span', {}, label));
+
+    const cards = visible.map(s => {
+      const count = PERIODS.filter(([k]) => s.released[k]).length;
+      return h('article', { class: 'ov-card' },
+        h('div', { class: 'ov-head' },
+          h('h2', {}, s.title),
+          h('span', { class: 'badge ' + (count === 4 ? 'ok' : '') }, `${count}/4 released`)),
+        h('p', { class: 'page-sub' }, [s.code, s.term, s.section].filter(Boolean).join(' · ')),
+        h('div', { class: 'ov-stats' },
+          h('span', {}, h('b', {}, s.enrolled), ` student${s.enrolled === 1 ? '' : 's'}`),
+          s.accountsPending
+            ? h('span', {}, h('b', {}, s.accountsPending), ' without an account')
+            : h('span', {}, 'All students have accounts'),
+          h('span', {}, 'Last import: ', s.lastImportAt ? fmtDateTime(s.lastImportAt) : 'not yet')),
+        h('div', { class: 'ov-actions' },
+          h('button', { class: 'btn ghost small', type: 'button', onclick: () => openSubject(s.id) }, 'Open subject')));
+    });
+
+    const empty = visible.length ? null : h('section', { class: 'panel' },
+      h('p', { class: 'empty' }, subjects.length ? 'No subjects match the current filter.' : 'No subjects yet. Create your first subject to get started.'),
+      h('div', { class: 'row-actions' }, h('button', { class: 'btn', type: 'button', onclick: openNew }, icon('plus'), 'New subject')));
+
+    detail.replaceChildren(
+      h('section', { class: 'panel page-head' },
+        h('div', {},
+          h('h1', { class: 'page-title' }, 'Overview'),
+          h('p', { class: 'page-sub' }, `${visible.length} subject${visible.length === 1 ? '' : 's'} · ${students} student${students === 1 ? '' : 's'} enrolled`)),
+        h('button', { class: 'btn', type: 'button', onclick: openNew }, icon('plus'), 'New subject')),
+      h('div', { class: 'stat-row' },
+        stat('Subjects', visible.length),
+        stat('Students', students),
+        stat('Periods released', `${released}/${visible.length * 4}`),
+        stat('Accounts to create', pending)),
+      empty || h('div', { class: 'overview-grid' }, ...cards));
+  }
+
   function csvCell(v) { const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+  function downloadCsv(rows, filename) {
+    const url = URL.createObjectURL(new Blob([rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv' }));
+    const a = h('a', { href: url, download: filename }); document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  }
   function credentialsDialog(title, list, { idLabel = 'Student ID', filename = 'student-credentials.csv' } = {}) {
     const dlg = h('dialog', { class: 'wide' },
       h('div', { class: 'dh' }, title),
@@ -117,16 +212,14 @@
           h('tbody', {}, list.map(c => h('tr', {}, h('td', {}, c.studentNo), h('td', {}, c.fullName), h('td', {}, c.username), h('td', {}, h('code', {}, c.tempPassword)))))))),
       h('div', { class: 'df' },
         h('button', { class: 'btn ghost', type: 'button', onclick: () => {
-          const rows = [[idLabel, 'Name', 'Username', 'Temporary password'], ...list.map(c => [c.studentNo, c.fullName, c.username, c.tempPassword])];
-          const url = URL.createObjectURL(new Blob([rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv' }));
-          const a = h('a', { href: url, download: filename }); document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+          downloadCsv([[idLabel, 'Name', 'Username', 'Temporary password'], ...list.map(c => [c.studentNo, c.fullName, c.username, c.tempPassword])], filename);
         } }, 'Download CSV'),
         h('button', { class: 'btn', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'I have saved these')));
-    document.body.append(dlg); dlg.showModal();
+    rememberDialogFocus(dlg); document.body.append(dlg); dlg.showModal();
   }
 
   // Generic confirmation used by the instructor-management actions.
-  function confirmDialog(title, message, confirmLabel, onConfirm, danger = true) {
+  function confirmDialog(title, message, confirmLabel, onConfirm, { danger = true, after = openTeachers } = {}) {
     const msg = h('p', { class: 'msg', role: 'alert' });
     const btn = h('button', { class: 'btn' + (danger ? ' danger-solid' : ''), type: 'button' }, confirmLabel);
     const dlg = h('dialog', { class: 'wide' },
@@ -137,10 +230,10 @@
         btn));
     btn.addEventListener('click', async () => {
       btn.disabled = true; msg.className = 'msg'; msg.textContent = 'Working…';
-      try { await onConfirm(); dlg.close(); dlg.remove(); await openTeachers(); }
+      try { await onConfirm(); dlg.close(); dlg.remove(); await after(); }
       catch (err) { btn.disabled = false; msg.className = 'msg err'; msg.textContent = err.message; }
     });
-    document.body.append(dlg); dlg.showModal();
+    rememberDialogFocus(dlg); document.body.append(dlg); dlg.showModal();
   }
 
   function resetTeacherDialog(t) {
@@ -153,7 +246,7 @@
         credentialsDialog('Temporary password',
           [{ studentNo: r.username, fullName: r.fullName, username: r.username, tempPassword: r.tempPassword }],
           { idLabel: 'Username', filename: 'instructor-credentials.csv' });
-      }, false);
+      }, { danger: false });
   }
 
   function createTeacherDialog() {
@@ -182,12 +275,88 @@
         h('button', { class: 'btn ghost', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancel'),
         h('button', { class: 'btn', type: 'submit' }, 'Create instructor')));
     const dlg = h('dialog', { class: 'wide' }, h('div', { class: 'dh' }, 'New instructor'), form);
-    document.body.append(dlg); dlg.showModal(); u.input.focus();
+    rememberDialogFocus(dlg); document.body.append(dlg); dlg.showModal(); u.input.focus();
+  }
+
+  function errorDialog(title, errors, after) {
+    const dlg = rememberDialogFocus(h('dialog', { class: 'wide' },
+      h('div', { class: 'dh' }, title),
+      h('div', { class: 'db' },
+        h('p', { class: 'hint' }, 'These rows were not created. Fix the CSV and upload it again.'),
+        h('div', { class: 'tablewrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, 'Line'), h('th', {}, 'Reason'))),
+          h('tbody', {}, errors.map(e => h('tr', {}, h('td', {}, e.line), h('td', {}, e.reason))))))),
+      h('div', { class: 'df' },
+        h('button', { class: 'btn', type: 'button', onclick: () => {
+          dlg.close(); dlg.remove(); if (after) after();
+        } }, 'Done'))));
+    document.body.append(dlg); dlg.showModal();
+  }
+
+  function bulkTeachersDialog() {
+    const fileId = `bulk-file-${Date.now()}`;
+    const file = h('input', { id: fileId, type: 'file', accept: '.csv,text/csv', 'aria-label': 'Instructor CSV' });
+    const fileName = h('span', { class: 'file-name' }, 'No file chosen');
+    const drop = h('label', { class: 'dropzone', for: fileId }, icon('upload'),
+      h('span', { class: 'drop-text' }, h('strong', {}, 'Choose an instructor CSV or drop it here'),
+        h('span', { class: 'hint' }, 'Columns: Username, Full name, optional Owner')),
+      fileName, file);
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault(); drop.classList.remove('over');
+      if (!e.dataTransfer.files.length) return;
+      try { file.files = e.dataTransfer.files; }
+      catch (_) { const dt = new DataTransfer(); for (const f of e.dataTransfer.files) dt.items.add(f); file.files = dt.files; }
+      file.dispatchEvent(new Event('change'));
+    });
+    file.addEventListener('change', () => {
+      const f = file.files[0];
+      fileName.textContent = f ? `${f.name} · ${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB` : 'No file chosen';
+      fileName.classList.toggle('has-file', !!f);
+    });
+    const templateBtn = h('button', { class: 'btn ghost small', type: 'button', onclick: () => {
+      downloadCsv([['Username', 'Full name', 'Owner'], ['sample.teacher', 'Sample Teacher', 'no']], 'instructor-template.csv');
+      toast('Template downloaded.', 'ok');
+    } }, 'Download template');
+    const msg = h('p', { class: 'msg', role: 'alert' });
+    const uploadBtn = h('button', { class: 'btn', type: 'button' }, 'Create accounts');
+    const dlg = rememberDialogFocus(h('dialog', { class: 'wide' },
+      h('div', { class: 'dh' }, 'Bulk add instructors'),
+      h('div', { class: 'db' },
+        h('p', {}, 'Add several instructors at once. Each row gets a random one-time password.'),
+        drop,
+        h('div', { class: 'row-actions' }, templateBtn),
+        h('p', { class: 'hint' }, 'Up to 50 instructor accounts in total. Usernames are case-sensitive; invalid, duplicate or existing usernames are skipped and reported. Temporary passwords are shown only once.'),
+        msg),
+      h('div', { class: 'df' },
+        h('button', { class: 'btn ghost', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancel'),
+        uploadBtn)));
+    uploadBtn.addEventListener('click', async () => {
+      if (!file.files[0]) { msg.className = 'msg err'; msg.textContent = 'Choose a CSV file first.'; return; }
+      uploadBtn.disabled = true; msg.className = 'msg'; msg.textContent = 'Creating accounts…';
+      try {
+        const csvText = await file.files[0].text();
+        const r = await api('/api/admin/teachers/bulk', { method: 'POST', body: { csv: csvText } });
+        dlg.close(); dlg.remove();
+        await openTeachers();
+        if (r.created.length) toast(`${r.created.length} instructor account(s) created.`, 'ok');
+        const showCreds = () => {
+          if (r.created.length) credentialsDialog(`${r.created.length} instructor account(s) created`,
+            r.created.map(c => ({ studentNo: c.username, fullName: c.fullName, username: c.username, tempPassword: c.tempPassword })),
+            { idLabel: 'Username', filename: 'instructor-credentials.csv' });
+        };
+        if (r.errors.length) errorDialog('Some instructor rows were skipped', r.errors, showCreds);
+        else showCreds();
+      } catch (err) { uploadBtn.disabled = false; msg.className = 'msg err'; msg.textContent = err.message; }
+    });
+    document.body.append(dlg); dlg.showModal();
   }
 
   async function openTeachers() {
     const token = ++renderToken;
     currentId = null; view = 'teachers'; setNewTerm = null; renderSidebar(); closeNav();
+    detail.replaceChildren(loadingPanel('Loading instructors…'));
     const rows = await api('/api/admin/teachers');
     if (token !== renderToken) return;
     const search = h('input', { type: 'search', placeholder: 'Filter by name or username…', 'aria-label': 'Filter instructors' });
@@ -214,7 +383,7 @@
                 ? 'They will be signed out immediately and cannot sign in until enabled again.'
                 : 'They will be able to sign in again with their existing password.')),
             t.active ? 'Disable' : 'Enable',
-            () => api(`/api/admin/teachers/${t.id}/active`, { method: 'PUT', body: { active: !t.active } }), t.active) },
+            () => api(`/api/admin/teachers/${t.id}/active`, { method: 'PUT', body: { active: !t.active } }), { danger: t.active }) },
             t.active ? 'Disable' : 'Enable'),
           h('button', { class: 'btn ghost small', type: 'button', onclick: () => confirmDialog(
             t.isOwner ? 'Remove owner access' : 'Grant owner access',
@@ -224,7 +393,7 @@
                 ? 'They keep their subjects but lose access to instructor management.'
                 : 'They will be able to create and manage instructor accounts.')),
             t.isOwner ? 'Remove owner' : 'Grant owner',
-            () => api(`/api/admin/teachers/${t.id}/owner`, { method: 'PUT', body: { owner: !t.isOwner } }), false) },
+            () => api(`/api/admin/teachers/${t.id}/owner`, { method: 'PUT', body: { owner: !t.isOwner } }), { danger: false }) },
             t.isOwner ? 'Remove owner' : 'Make owner'))))));
     };
     search.addEventListener('input', refresh);
@@ -233,7 +402,21 @@
       h('section', { class: 'panel page-head' },
         h('div', {}, h('h1', { class: 'page-title' }, 'Instructors'),
           h('p', { class: 'page-sub' }, `${rows.length} instructor account${rows.length === 1 ? '' : 's'} · Owners can create, reset and disable accounts.`)),
-        h('button', { class: 'btn', type: 'button', onclick: createTeacherDialog }, icon('plus'), 'New instructor')),
+        h('div', { class: 'head-actions' },
+          h('button', { class: 'btn', type: 'button', onclick: createTeacherDialog }, icon('plus'), 'New instructor'),
+          h('button', { class: 'btn ghost', type: 'button', onclick: bulkTeachersDialog }, icon('upload'), 'Bulk add CSV'),
+          h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+            const text = [['Username', 'Full name', 'Status', 'Access', 'Subjects', 'Last login'],
+              ...rows.map(t => [t.username, t.fullName, t.active ? 'Active' : 'Disabled', t.isOwner ? 'Owner' : 'Instructor', t.subjectCount, t.lastLogin || ''])]
+              .map(r => r.join('\t')).join('\r\n');
+            const ok = await copyText(text);
+            toast(ok ? 'Instructor list copied.' : 'Could not copy — use Export CSV instead.', ok ? 'ok' : 'err');
+          } }, icon('copy'), 'Copy list'),
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => {
+            downloadCsv([['Username', 'Full name', 'Status', 'Access', 'Subjects', 'Last login'],
+              ...rows.map(t => [t.username, t.fullName, t.active ? 'Active' : 'Disabled', t.isOwner ? 'Owner' : 'Instructor', t.subjectCount, t.lastLogin || ''])], 'instructors.csv');
+            toast('Instructor list exported.', 'ok');
+          } }, icon('download'), 'Export CSV'))),
       h('section', { class: 'panel' },
         h('div', { class: 'filter-row' }, search),
         h('div', { class: 'tablewrap' }, h('table', {},
@@ -341,12 +524,14 @@
         msg.className = 'msg err'; msg.textContent = err.message;
       }
     });
-    document.body.append(dlg); dlg.showModal();
+    rememberDialogFocus(dlg); document.body.append(dlg); dlg.showModal();
   }
 
   async function openSubject(id) {
     const token = ++renderToken;
     currentId = id; view = 'subject'; setNewTerm = null;
+    renderSidebar(); closeNav();
+    detail.replaceChildren(loadingPanel('Loading subject…'));
     await loadSubjects();
     if (token !== renderToken) return;
     const s = await api(`/api/admin/subjects/${id}`);
@@ -415,6 +600,7 @@
         h('button', { class: 'btn ghost', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancel'),
         h('button', { class: 'btn', type: 'submit' }, 'Save changes')));
     const dlg = h('dialog', { class: 'wide' }, h('div', { class: 'dh' }, 'Edit subject'), form);
+    rememberDialogFocus(dlg);
     document.body.append(dlg);
     dlg.showModal();
     code.input.focus();
@@ -432,13 +618,77 @@
       return h('label', {}, cb, label);
     });
 
+    // Sticky section nav: lets instructors jump around this long page without scrolling.
+    const sections = [['subject-import', 'Publish'], ['subject-release', 'Release'], ['subject-students', 'Students'], ['subject-activity', 'Activity']];
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const subnav = h('nav', { class: 'subnav', 'aria-label': 'Subject sections' }, ...sections.map(([id, label], i) => {
+      const btn = h('button', { type: 'button', 'aria-current': i === 0 ? 'true' : null, onclick: () => {
+        subnav.querySelectorAll('button').forEach(b => b.removeAttribute('aria-current'));
+        btn.setAttribute('aria-current', 'true');
+        document.getElementById(id)?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+      } }, label);
+      return btn;
+    }));
+
+    // Bulk release helpers, both confirmed before changing anything.
+    const releaseAllBtn = h('button', { class: 'btn ghost small', type: 'button', onclick: () => confirmDialog(
+      'Release all periods',
+      h('p', {}, 'Release all four periods for ', h('strong', {}, s.title), '?', h('br'),
+        h('span', { class: 'hint' }, 'Students will see every grade and the Final Grade immediately.')),
+      'Release all', async () => {
+        await api(`/api/admin/subjects/${s.id}/releases`, { method: 'PUT', body: Object.fromEntries(PERIODS.map(([k]) => [k, true])) });
+      }, { danger: false, after: () => openSubject(s.id) }) }, icon('check'), 'Release all');
+    const otherSubjects = subjects.filter(x => x.id !== s.id);
+    const copySel = h('select', { 'aria-label': 'Copy release settings from subject' },
+      ...otherSubjects.map(x => h('option', { value: x.id }, `${x.code} · ${x.title} · ${x.term}${x.section ? ' · ' + x.section : ''}`)));
+    const copyPreview = h('p', { class: 'hint', role: 'status' });
+    const updateCopyPreview = () => {
+      const src = subjects.find(x => x.id === Number(copySel.value));
+      copyPreview.textContent = src
+        ? `Source: ${PERIODS.map(([k, l]) => `${l} ${src.released[k] ? 'released' : 'hidden'}`).join(', ')}. This replaces the current settings.`
+        : 'Add another subject first, then copy its release settings.';
+    };
+    copySel.addEventListener('change', updateCopyPreview); updateCopyPreview();
+    const copyReleaseBtn = h('button', { class: 'btn ghost small', type: 'button', onclick: () => {
+      const src = subjects.find(x => x.id === Number(copySel.value));
+      if (!src) { toast('Create another subject first.', 'err'); return; }
+      confirmDialog('Copy release settings',
+        h('div', {}, h('p', {}, 'Copy the release settings from:'), copySel, copyPreview),
+        'Copy settings', async () => {
+          await api(`/api/admin/subjects/${s.id}/releases`, { method: 'PUT', body: Object.fromEntries(PERIODS.map(([k]) => [k, !!src.released[k]])) });
+        }, { danger: false, after: () => openSubject(s.id) });
+    } }, icon('copy'), 'Copy from subject');
+
     // --- import ---
-    const file = h('input', { type: 'file', accept: '.csv,text/csv', 'aria-label': 'Registrar Report CSV' });
+    const fileId = `imp-file-${s.id}`;
+    const file = h('input', { id: fileId, type: 'file', accept: '.csv,text/csv', 'aria-label': 'Registrar Report CSV' });
+    const fileName = h('span', { class: 'file-name' }, 'No file chosen');
+    const drop = h('label', { class: 'dropzone', for: fileId },
+      icon('upload'),
+      h('span', { class: 'drop-text' },
+        h('strong', {}, 'Choose a CSV or drop it here'),
+        h('span', { class: 'hint' }, 'Registrar Report exported from the gradebook')),
+      fileName, file);
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault(); drop.classList.remove('over');
+      if (!e.dataTransfer.files.length) return;
+      try { file.files = e.dataTransfer.files; }
+      catch (_) { const dt = new DataTransfer(); for (const f of e.dataTransfer.files) dt.items.add(f); file.files = dt.files; }
+      file.dispatchEvent(new Event('change'));
+    });
+
     const report = h('div', {});
     const checkBtn = h('button', { class: 'btn ghost', type: 'button' }, 'Check file');
     const importBtn = h('button', { class: 'btn', type: 'button', disabled: true }, 'Import');
     let csvText = '';
-    file.addEventListener('change', () => { importBtn.disabled = true; report.replaceChildren(); csvText = ''; });
+    file.addEventListener('change', () => {
+      importBtn.disabled = true; importBtn.textContent = 'Import'; report.replaceChildren(); csvText = '';
+      const f = file.files[0];
+      fileName.textContent = f ? `${f.name} · ${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB` : 'No file chosen';
+      fileName.classList.toggle('has-file', !!f);
+    });
     const showResult = (r) => report.replaceChildren(
       h('div', { class: 'sum' }, h('span', {}, r.rows, ' ', h('em', {}, 'students in file')), h('span', {}, r.newStudents, ' ', h('em', {}, 'new')),
         h('span', {}, r.updatedEnrollments, ' ', h('em', {}, 'already enrolled (grades updated)')), h('span', {}, r.skipped.length, ' ', h('em', {}, 'skipped'))),
@@ -447,42 +697,86 @@
         h('tbody', {}, r.skipped.map(k => h('tr', {}, h('td', {}, k.line), h('td', {}, k.reason)))))) : null);
     checkBtn.addEventListener('click', async () => {
       if (!file.files[0]) { report.replaceChildren(h('p', { class: 'msg err' }, 'Choose the Registrar Report CSV first.')); return; }
+      checkBtn.disabled = true; checkBtn.textContent = 'Checking…';
       try {
         csvText = await file.files[0].text();
         const r = await api(`/api/admin/subjects/${s.id}/import`, { method: 'POST', body: { csv: csvText, dryRun: true } });
         showResult(r); importBtn.disabled = r.rows === 0; importBtn.textContent = `Import ${r.rows} student${r.rows === 1 ? '' : 's'}`;
       } catch (err) { report.replaceChildren(h('p', { class: 'msg err' }, err.message)); importBtn.disabled = true; }
+      finally { checkBtn.disabled = false; checkBtn.textContent = 'Check file'; }
     });
     importBtn.addEventListener('click', async () => {
-      importBtn.disabled = true;
-      try { const r = await api(`/api/admin/subjects/${s.id}/import`, { method: 'POST', body: { csv: csvText } }); await openSubject(s.id); document.getElementById('imp-done').textContent = `Imported ${r.rows} student(s).`; }
-      catch (err) { report.replaceChildren(h('p', { class: 'msg err' }, err.message)); }
+      importBtn.disabled = true; importBtn.textContent = 'Importing…';
+      try {
+        const r = await api(`/api/admin/subjects/${s.id}/import`, { method: 'POST', body: { csv: csvText } });
+        lastImport = { subjectId: s.id, rows: r.rows, at: new Date().toISOString() };
+        await openSubject(s.id);
+        toast(`Imported ${r.rows} student${r.rows === 1 ? '' : 's'}.`, 'ok');
+      } catch (err) { report.replaceChildren(h('p', { class: 'msg err' }, err.message)); importBtn.textContent = 'Import'; }
     });
+    const importNote = lastImport && lastImport.subjectId === s.id
+      ? h('p', { class: 'msg ok' }, `Imported ${lastImport.rows} student${lastImport.rows === 1 ? '' : 's'} at ${fmtDateTime(lastImport.at)}.`)
+      : null;
 
     // --- students ---
     const noAccount = s.students.filter(x => !x.hasAccount).length;
-    const resetBtn = (st) => h('button', { class: 'btn ghost small', type: 'button', onclick: async () => {
-      if (!confirm(`Reset the password for ${st.fullName}? Their current password and sessions stop working.`)) return;
-      try { const c = await api(`/api/admin/students/${st.studentId}/reset-password`, { method: 'POST' }); credentialsDialog('New temporary password', [c]); }
-      catch (err) { alert(err.message); }
+    const resetBtn = (st) => h('button', { class: 'btn ghost small', type: 'button', onclick: () => {
+      let created = null;
+      confirmDialog('Reset student password',
+        h('p', {}, 'Reset the password for ', h('strong', {}, st.fullName), '?', h('br'),
+          h('span', { class: 'page-sub' }, st.studentNo), h('br'),
+          h('span', { class: 'hint' }, 'Their current password and sessions stop working. The new temporary password is shown once.')),
+        'Reset password',
+        async () => { created = await api(`/api/admin/students/${st.studentId}/reset-password`, { method: 'POST' }); },
+        { danger: false, after: async () => { credentialsDialog('New temporary password', [created]); } });
     } }, 'Reset password');
+    const copyUsernameBtn = (st) => h('button', { class: 'btn ghost small', type: 'button',
+      'aria-label': `Copy username ${st.studentNo}`, onclick: async () => {
+        const ok = await copyText(st.studentNo);
+        toast(ok ? `Username ${st.studentNo} copied.` : 'Could not copy username.', ok ? 'ok' : 'err');
+      } }, icon('copy'), 'Copy username');
+    const studentSearch = h('input', { type: 'search', placeholder: 'Search name or Student ID…', 'aria-label': 'Search students' });
+    const accountFilter = h('select', { 'aria-label': 'Filter students by account status' },
+      h('option', { value: 'all' }, 'All accounts'),
+      h('option', { value: 'yes' }, 'Has account'),
+      h('option', { value: 'no' }, 'No account'));
+    const studentCount = h('span', { class: 'count', 'aria-live': 'polite' });
+    const studentTbody = h('tbody', {});
     const headRow = h('tr', {},
       h('th', {}, 'Student ID'), h('th', {}, 'Name'),
       PERIODS.map(([k, l]) => h('th', { class: 'num' }, l)),
       h('th', { class: 'num' }, 'Final'), h('th', {}, 'Remark'), h('th', {}, 'Account'));
-    const bodyRows = s.students.map(st => h('tr', {},
-      h('td', {}, st.studentNo), h('td', {}, st.fullName),
-      PERIODS.map(([k]) => h('td', { class: s.released[k] ? 'num' : 'num dim', title: s.released[k] ? '' : 'Hidden from students' }, fmt(st[k]))),
-      h('td', { class: s.released.finals ? 'num' : 'num dim' }, fmt(st.finalGp)),
-      h('td', {}, st.remark || '—'),
-      h('td', {}, st.hasAccount ? resetBtn(st) : 'No account')));
+    const renderStudentRows = () => {
+      const q = studentSearch.value.trim().toLowerCase();
+      const status = accountFilter.value;
+      const rows = s.students.filter(st => (!q || `${st.fullName} ${st.studentNo}`.toLowerCase().includes(q))
+        && (status === 'all' || (status === 'yes') === !!st.hasAccount));
+      studentCount.textContent = `${rows.length} of ${s.students.length} student${s.students.length === 1 ? '' : 's'}`;
+      studentTbody.replaceChildren(...rows.map(st => h('tr', {},
+        h('td', {}, st.studentNo), h('td', {}, st.fullName),
+        PERIODS.map(([k]) => h('td', { class: s.released[k] ? 'num' : 'num dim', title: s.released[k] ? '' : 'Hidden from students' }, fmt(st[k]))),
+        h('td', { class: s.released.finals ? 'num' : 'num dim' }, fmt(st.finalGp)),
+        h('td', {}, st.remark || '—'),
+        h('td', {}, st.hasAccount
+          ? h('div', { class: 'row-actions tight' }, copyUsernameBtn(st), resetBtn(st))
+          : h('span', { class: 'badge off' }, 'No account')))));
+    };
+    studentSearch.addEventListener('input', renderStudentRows);
+    accountFilter.addEventListener('change', renderStudentRows);
+    renderStudentRows();
     const studentsTable = s.students.length === 0
       ? h('p', { class: 'hint' }, 'No students yet. Import the Registrar Report above.')
-      : h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, headRow), h('tbody', {}, bodyRows)));
+      : h('div', {}, h('div', { class: 'filter-row' }, studentSearch, accountFilter, studentCount),
+        h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, headRow), studentTbody)));
 
     const acctBtn = h('button', { class: 'btn', type: 'button', disabled: noAccount === 0, onclick: async () => {
-      try { const r = await api(`/api/admin/subjects/${s.id}/accounts`, { method: 'POST' }); await openSubject(s.id); if (r.created.length) credentialsDialog(`${r.created.length} account(s) created`, r.created); }
-      catch (err) { alert(err.message); }
+      acctBtn.disabled = true;
+      try {
+        const r = await api(`/api/admin/subjects/${s.id}/accounts`, { method: 'POST' });
+        await openSubject(s.id);
+        if (r.created.length) credentialsDialog(`${r.created.length} account(s) created`, r.created);
+        else toast('All enrolled students already have accounts.', 'ok');
+      } catch (err) { acctBtn.disabled = false; toast(err.message); }
     } }, noAccount ? `Create accounts for ${noAccount} student${noAccount === 1 ? '' : 's'}` : 'All students have accounts');
 
     // --- activity ---
@@ -496,25 +790,30 @@
     });
 
     detail.replaceChildren(
-      h('section', { class: 'panel page-head' },
+      h('section', { class: 'panel page-head subject-section', id: 'subject-top' },
         h('div', {},
           h('h1', { class: 'page-title' }, s.title),
           h('p', { class: 'page-sub' }, [s.code, s.term, s.section].filter(Boolean).join(' · ')),
-          h('p', { class: 'hint' }, `${s.students.length} student${s.students.length === 1 ? '' : 's'} enrolled · Students see only what you release below.`)),
+          h('p', { class: 'hint' }, `${s.students.length} student${s.students.length === 1 ? '' : 's'} enrolled · Last import: ${s.lastImportAt ? fmtDateTime(s.lastImportAt) : 'not yet'} · Students see only what you release below.`)),
         h('div', { class: 'head-actions' },
           h('button', { class: 'btn ghost', type: 'button', onclick: () => editSubject(s) }, icon('edit'), 'Edit subject'),
           h('button', { class: 'btn danger', type: 'button', onclick: () => deleteSubject(s) }, icon('trash'), 'Delete'))),
-      h('section', { class: 'panel' }, h('h3', {}, '1. Publish grades from the gradebook'),
+      subnav,
+      h('section', { class: 'panel subject-section', id: 'subject-import' }, h('h3', {}, '1. Publish grades from the gradebook'),
         h('p', { class: 'hint' }, 'In the gradebook, open the section and click “Registrar Report (CSV)”, then upload that file here. Re-upload any time to update grades. Every student needs a Student ID in the gradebook.'),
-        h('div', { class: 'row-actions' }, file, checkBtn, importBtn), h('p', { class: 'msg ok', id: 'imp-done' }), report),
-      h('section', { class: 'panel' }, h('h3', {}, '2. Release periods to students'),
+        drop,
+        h('div', { class: 'row-actions' }, checkBtn, importBtn),
+        importNote, report),
+      h('section', { class: 'panel subject-section', id: 'subject-release' }, h('h3', {}, '2. Release periods to students'),
         h('div', { class: 'rel' }, relBoxes),
+        h('div', { class: 'row-actions' }, releaseAllBtn, copyReleaseBtn),
         h('p', { class: 'hint' }, 'Tick a period when you are ready for students to see it. The Final Grade appears only after all four periods are released. Greyed grades below are still hidden from students.'), relMsg),
-      h('section', { class: 'panel' }, h('h3', {}, '3. Students and accounts'),
+      h('section', { class: 'panel subject-section', id: 'subject-students' }, h('h3', {}, '3. Students and accounts'),
         h('div', { class: 'row-actions' }, acctBtn), h('p', { class: 'hint' }, 'Usernames are Student IDs. Each student gets a one-time temporary password.'), studentsTable),
-      h('section', { class: 'panel' }, logDetails));
+      h('section', { class: 'panel subject-section', id: 'subject-activity' }, logDetails));
   }
 
+  detail.replaceChildren(loadingPanel('Loading overview…'));
   await loadSubjects();
-  if (subjects.length) await openSubject(subjects[0].id); else openNew();
+  if (subjects.length) renderOverview(); else openNew();
 })().catch(err => { if (err.message !== 'Signed out') console.error(err); });

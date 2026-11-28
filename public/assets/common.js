@@ -42,6 +42,12 @@
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
     trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/>',
     users: '<path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.2"/><path d="M17 11a3 3 0 0 0 0-6M18 20v-1.4a3.4 3.4 0 0 0-2.4-3.3"/>',
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+    print: '<path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="7" y="14" width="10" height="7" rx="1"/>',
+    upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 20h16"/>',
+    download: '<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+    check: '<path d="M4 12.5l5 5L20 6.5"/>',
   };
   function icon(name) {
     const span = document.createElement('span');
@@ -51,6 +57,32 @@
   }
 
   const wordmark = () => h('a', { class: 'wordmark', href: '/' }, 'grade', h('span', { class: 'gold' }, 'portal'));
+
+  // Shared mobile-menu toggle. Keeps aria-expanded in sync and lets Escape collapse the sidebar.
+  function syncNavButtons() {
+    document.querySelectorAll('[aria-controls="nav"]').forEach(b =>
+      b.setAttribute('aria-expanded', String(!document.body.classList.contains('nav-collapsed'))));
+  }
+  function navToggle() {
+    const btn = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Show or hide menu', 'aria-controls': 'nav' }, icon('menu'));
+    btn.addEventListener('click', () => { document.body.classList.toggle('nav-collapsed'); syncNavButtons(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && window.innerWidth < 900 && !document.body.classList.contains('nav-collapsed')) {
+        document.body.classList.add('nav-collapsed'); syncNavButtons(); btn.focus();
+      }
+    });
+    syncNavButtons();
+    return btn;
+  }
+
+  // Return focus to whatever opened a dialog once it closes (when that element is still on screen).
+  function rememberDialogFocus(dlg) {
+    const prev = document.activeElement;
+    dlg.addEventListener('close', () => {
+      if (prev && prev.isConnected && typeof prev.focus === 'function') prev.focus();
+    });
+    return dlg;
+  }
 
   const initials = (name) => {
     const t = String(name).replace(/,/g, ' ').split(/\s+/).filter(Boolean);
@@ -77,19 +109,15 @@
       if (open) menu.querySelector('button').focus();
     });
     document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) close(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { close(); btn.focus(); } });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !menu.hidden) { close(); btn.focus(); } });
     return wrap;
   }
 
-  // Instructor-page header. Pass { menu: true } when the page has a collapsible sidebar.
-  function topbar(me, { menu = false } = {}) {
+  // Page header shared by both dashboards. `role` is the small label next to the wordmark.
+  function topbar(me, { menu = false, role = 'Instructor' } = {}) {
     const bar = h('div', { class: 'topbar' });
-    if (menu) {
-      const btn = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Show or hide menu', 'aria-controls': 'nav' }, icon('menu'));
-      btn.addEventListener('click', () => document.body.classList.toggle('nav-collapsed'));
-      bar.append(btn);
-    }
-    bar.append(wordmark(), h('span', { class: 'tag' }, 'Instructor'), h('span', { class: 'spacer' }), avatarMenu(me));
+    if (menu) bar.append(navToggle());
+    bar.append(wordmark(), h('span', { class: 'tag' }, role), h('span', { class: 'spacer' }), avatarMenu(me));
     return bar;
   }
 
@@ -120,6 +148,7 @@
           h('div', { class: 'df' },
             forced ? null : h('button', { class: 'btn ghost', type: 'button', onclick: () => { dlg.close(); dlg.remove(); resolve(false); } }, 'Cancel'),
             h('button', { class: 'btn', type: 'submit' }, 'Save password'))));
+      rememberDialogFocus(dlg);
       if (forced) dlg.addEventListener('cancel', e => e.preventDefault());   // Esc can't skip it
       document.body.append(dlg);
       dlg.showModal();
@@ -127,5 +156,5 @@
     });
   }
 
-  window.App = { h, api, icon, wordmark, avatarMenu, topbar, passwordDialog };
+  window.App = { h, api, icon, wordmark, avatarMenu, topbar, navToggle, syncNavButtons, rememberDialogFocus, passwordDialog };
 })();

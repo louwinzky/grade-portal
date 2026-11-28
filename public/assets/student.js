@@ -1,14 +1,13 @@
 'use strict';
 (async function () {
-  const { h, api, icon, wordmark, avatarMenu, passwordDialog } = App;
+  const { h, api, icon, topbar, syncNavButtons, passwordDialog } = App;
   const me = await api('/api/me');
 
   // ---------- top bar + sidebar ----------
+  document.getElementById('top').append(topbar(me, { menu: true, role: 'Student' }));
+
   const nav = document.getElementById('nav');
-  const burger = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Show or hide menu', 'aria-controls': 'nav' }, icon('menu'));
-  burger.addEventListener('click', () => document.body.classList.toggle('nav-collapsed'));
-  document.getElementById('top').append(burger, wordmark(), h('span', { class: 'spacer' }), avatarMenu(me));
-  if (window.innerWidth < 900) document.body.classList.add('nav-collapsed');
+  if (window.innerWidth < 900) { document.body.classList.add('nav-collapsed'); syncNavButtons(); }
 
   const ITEMS = [
     { head: 'Information' },
@@ -17,14 +16,19 @@
     { id: 'faq', label: 'FAQs', icon: 'help' },
     { id: 'privacy', label: 'Privacy Notice', icon: 'shield' },
   ];
-  ITEMS.forEach(i => nav.append(i.head
+  // Only the links scroll; the identity footer stays pinned like the instructor sidebar.
+  const sideScroll = h('div', { class: 'side-scroll' }, ...ITEMS.map(i => i.head
     ? h('div', { class: 'nav-head' }, i.head)
     : h('a', { class: 'nav-item', href: '#' + i.id, 'data-view': i.id }, icon(i.icon), i.label)));
+  nav.append(sideScroll, h('div', { class: 'nav-foot' }, h('span', {}, 'Signed in as'),
+    h('strong', {}, `${me.fullName} · Student No. ${me.username}`)));
 
   function showView() {
     const id = ['grades', 'faq', 'privacy'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'grades';
     for (const v of ['grades', 'faq', 'privacy']) document.getElementById('view-' + v).hidden = v !== id;
     nav.querySelectorAll('.nav-item').forEach(a => { if (a.dataset.view === id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    // Changing views starts at the top instead of keeping the previous scroll position.
+    document.querySelector('.content').scrollTop = 0;
     if (window.innerWidth < 900) document.body.classList.add('nav-collapsed');
   }
   window.addEventListener('hashchange', showView);
@@ -38,12 +42,14 @@
     h('h3', {}, 'Why does a grading period show “—”?'), h('p', {}, 'Your instructor has not released that period yet. It will appear here as soon as it is released.'),
     h('h3', {}, 'Why is my Final Grade not showing?'), h('p', {}, 'The Final Grade appears after all four grading periods have been released.'),
     h('h3', {}, 'How is my grade computed?'), h('p', {}, 'Your instructor computes your grades from your graded work. This portal only displays the results; ask your instructor if you want to review how a grade was computed.'),
+    h('h3', { id: 'faq-average' }, 'How are Term Avg and Overall Avg computed?'),
+    h('p', {}, 'Term Avg is the simple average of the Final Grades released to you for the selected school year and term. Overall Avg uses all your released Final Grades across terms. Subjects marked Dropped are excluded. Lower numbers are better. These are portal summaries, not an official registrar GWA.'),
     h('h3', {}, 'What do the Final Grade numbers mean?'),
     h('p', {}, 'Final Grades use a 1.00 – 5.00 scale where 1.00 is the highest, 3.00 is the lowest passing grade, and 5.00 is failing. Period grades above are percentages.'),
     h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Percentage'), h('th', { class: 'num' }, 'Final Grade'))),
       h('tbody', {}, SCALE.map(([a, b]) => h('tr', {}, h('td', {}, a), h('td', { class: 'num' }, b))))),
     h('h3', {}, 'I forgot my password.'), h('p', {}, 'Ask your instructor to reset it. You will be given a temporary password and asked to choose a new one when you sign in.'),
-    h('h3', {}, 'Something looks wrong.'), h('p', {}, 'Tell your instructor. Grades here are published by your instructor, who can correct and re-publish them.'));
+    h('h3', {}, 'Something looks wrong.'), h('p', {}, 'Tell your instructor. Grades here are published by your instructor.'));
 
   document.getElementById('view-privacy').append(
     h('h2', {}, 'Privacy notice'),
@@ -59,9 +65,13 @@
 
   // ---------- grades ----------
   if (me.mustChangePassword) await passwordDialog({ forced: true });
-  const { subjects } = await api('/api/student/grades');
-
   const termSel = document.getElementById('term'), cards = document.getElementById('cards'), empty = document.getElementById('empty');
+  empty.setAttribute('role', 'status');
+  empty.hidden = false; empty.textContent = 'Loading grades…';
+  cards.setAttribute('aria-busy', 'true');
+  document.querySelector('.term-row').append(
+    h('button', { class: 'btn ghost small print-btn', type: 'button', onclick: () => window.print() }, icon('print'), 'Print'));
+  const { subjects } = await api('/api/student/grades');
   [...new Set(subjects.map(s => s.term))].forEach(t => termSel.append(h('option', { value: t }, t)));
 
   const fmt = v => (v == null ? '—' : Number(v).toFixed(2));
@@ -77,26 +87,39 @@
     const final = s.finalVisible
       ? h('div', { class: 'final' }, h('span', { class: 'pill' }, 'Final Grade'), h('span', { class: `chip ${s.remark}` }, s.remark), h('span', { class: 'score' }, fmt(s.finalGrade)))
       : h('div', { class: 'final' }, h('span', { class: 'pill' }, 'Final Grade'), h('span', { class: 'wait' }, 'Shown once all grading periods are released'));
+    const grades = h('table', { class: 'periods-table' },
+      h('caption', { class: 'visually-hidden' }, `${s.title} grades by period`),
+      h('thead', {}, h('tr', {}, s.periods.map(p => h('th', { scope: 'col' }, p.label)))),
+      h('tbody', {}, h('tr', {}, s.periods.map(p => h('td', { class: p.released ? null : 'pending' },
+        p.released ? fmt(p.value) : h('span', { 'aria-label': 'Not yet released' }, '—'))))));
     return h('article', { class: 'subject' },
       h('header', {}, h('h2', {}, s.title), h('div', { class: 'sub' }, [s.instructor, fmtDate(s.updatedAt)].filter(Boolean).join(' • '))),
-      h('div', { class: 'sbody' },
-        h('div', { class: 'periods' },
-          s.periods.map(p => h('div', { class: 'lbl' }, p.label)),
-          s.periods.map(p => h('div', { class: 'val' + (p.released ? '' : ' pending'), title: p.released ? '' : 'Not yet released' }, fmt(p.value)))),
-        final));
+      h('div', { class: 'sbody' }, grades, final));
   }
   function render() {
     const list = subjects.filter(s => s.term === termSel.value);
     cards.replaceChildren(...list.map(card));
+    cards.setAttribute('aria-busy', 'false');
     empty.hidden = list.length > 0;
+    if (!list.length) {
+      empty.textContent = subjects.length
+        ? 'No grades have been published for this term yet.'
+        : 'No grades have been published for you yet. Check back after your instructor releases them.';
+    }
     document.getElementById('level').textContent = [...new Set(list.map(s => s.section).filter(Boolean))].join(', ') || 'My Grades';
-    document.getElementById('gwa').replaceChildren(
-      'Term Avg: ', h('b', {}, avg(list)), ' | Overall Avg: ', h('b', {}, avg(subjects)));
-    document.getElementById('gwa').title = 'Simple average of the Final Grades released to you in this portal';
+    const gwa = document.getElementById('gwa');
+    gwa.replaceChildren('Term Avg: ', h('b', {}, avg(list)), ' | Overall Avg: ', h('b', {}, avg(subjects)),
+      h('button', { class: 'link-btn', type: 'button', onclick: () => {
+        location.hash = 'faq'; showView();
+        const target = document.getElementById('faq-average');
+        if (target) { target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'start' }); }
+      } }, 'How averages work'));
+    gwa.title = 'Simple average of the Final Grades released to you in this portal';
   }
   termSel.addEventListener('change', render);
   render();
 })().catch(err => {
   if (err.message === 'Signed out') return;
   const e = document.getElementById('empty'); e.hidden = false; e.textContent = err.message;
+  document.getElementById('cards').setAttribute('aria-busy', 'false');
 });
